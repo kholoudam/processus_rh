@@ -5,19 +5,12 @@ const path = require('path');
 const pool = require('../config/db');
 const { parseCV } = require('./parser.service');
 
-// ===============================
-// 🔥 DOSSIER UPLOADS (DANS BACKEND)
-// ===============================
 const uploadDir = path.join(__dirname, '../../uploads');
 
-// ✅ créer dossier automatiquement si inexistant
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// ===============================
-// 🔹 CONFIG IMAP
-// ===============================
 const config = {
   imap: {
     user: process.env.EMAIL_USER,
@@ -25,139 +18,108 @@ const config = {
     host: process.env.IMAP_HOST,
     port: 993,
     tls: true,
-    authTimeout: 10000,
     tlsOptions: { rejectUnauthorized: false }
   }
 };
 
-// ===============================
-// 🔹 SAFE JSON
-// ===============================
-const safeJSON = (data) => {
-  try {
-    return JSON.stringify(data || []);
-  } catch {
-    return "[]";
-  }
-};
-
-// ===============================
-// 🔹 FETCH EMAILS
-// ===============================
 exports.fetchEmails = async () => {
-  try {
-    console.log("📩 Checking emails...");
+  const connection = await imaps.connect(config);
+  await connection.openBox('INBOX');
 
-    const connection = await imaps.connect(config);
-    await connection.openBox('INBOX');
+  const messages = await connection.search(['UNSEEN'], {
+    bodies: [''],
+    markSeen: true
+  });
 
-    console.log("✅ Connexion IMAP réussie");
+  for (let item of messages) {
+    const client = await pool.connect();
 
-    const searchCriteria = ['ALL'];
-    const fetchOptions = { bodies: [''], markSeen: true };
+    try {
+      await client.query('BEGIN');
 
-    const messages = await connection.search(searchCriteria, fetchOptions);
+      const all = item.parts.find(p => p.which === '');
+      const parsed = await simpleParser(all.body);
 
-    console.log(`📥 Emails trouvés : ${messages.length}`);
+      const sender = parsed.from?.value[0]?.address || "";
+      const subject = parsed.subject || "";
+      const body = parsed.text || "";
 
-    for (let item of messages) {
-      try {
-        const all = item.parts.find(p => p.which === '');
-        const parsed = await simpleParser(all.body);
+      // EMAIL
+      const emailRes = await client.query(
+        `INSERT INTO email (subject, body, sender)
+         VALUES ($1,$2,$3) RETURNING id`,
+        [subject, body, sender]
+      );
 
-        const email = parsed.from?.value[0]?.address || "";
-        const subject = parsed.subject || "";
-        const body = parsed.text || parsed.html || "";
+      const email_id = emailRes.rows[0].id;
 
-        let cv_link = null;
-        let filePath = null;
+      // PARSE
+      let parsedData = { first_name: "", last_name: "", phone: "", address: "Casablanca", degree: "" };
+      let filePath = null;
 
-        // ===============================
-        // 📎 ATTACHMENT (UPLOAD FIX)
-        // ===============================
-        if (parsed.attachments && parsed.attachments.length > 0) {
-          const att = parsed.attachments[0];
+      if (parsed.attachments?.length) {
+        const att = parsed.attachments[0];
 
-          // sécuriser nom fichier
-          const safeName = att.filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-          const fileName = Date.now() + "_" + safeName;
+        const fileName = Date.now() + "_" + att.filename.replace(/[^\w.-]/g, "_");
+        filePath = path.join(uploadDir, fileName);
 
-          filePath = path.join(uploadDir, fileName);
+        fs.writeFileSync(filePath, att.content);
+        parsedData = await parseCV(filePath, body);
+      }
 
-          // 🔥 écrire fichier
-          fs.writeFileSync(filePath, att.content);
+      const fullName = `${parsedData.first_name} ${parsedData.last_name}`.trim();
 
-          console.log("📄 CV sauvegardé :", filePath);
+      let candidate = await client.query(
+        "SELECT * FROM candidate WHERE email=$1",
+        [sender]
+      );
 
-          // 🔥 lien correct
-          cv_link = `/uploads/${fileName}`;
-        }
+      let candidate_id;
 
-        // ===============================
-        // 🔹 PARSING CV
-        // ===============================
-        let parsedData = {
-          first_name: "",
-          last_name: "",
-          phone: "",
-          address: "Casablanca",
-          skills: [],
-          education: [],
-          experience: []
-        };
-
-        if (filePath) {
-          try {
-            parsedData = await parseCV(filePath, body);
-          } catch (err) {
-            console.log("⚠️ Erreur parsing CV :", err.message);
-          }
-        }
-
-        // ===============================
-        // 🔹 ANTI DUPLICATION
-        // ===============================
-        const exists = await pool.query(
-          "SELECT * FROM candidates WHERE email = $1 AND subject = $2",
-          [email, subject]
+      if (candidate.rows.length > 0) {
+        candidate_id = candidate.rows[0].id;
+      } else {
+        const newC = await client.query(
+          `INSERT INTO candidate (name,email,phone,address,degree,status)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+          [
+            fullName || "Non défini",
+            sender,
+            parsedData.phone || "",
+            parsedData.address || "Casablanca",
+            parsedData.degree || "",
+            "RECEIVED"
+          ]
         );
 
-        if (exists.rows.length > 0) {
-          console.log("⚠️ Email déjà existant :", email);
-          continue;
-        }
-
-        // ===============================
-        // 🔹 INSERT DB
-        // ===============================
-        await pool.query(`
-          INSERT INTO candidates
-          (first_name, last_name, email, subject, body, cv_link, phone, address, education, experience, skills)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        `, [
-          parsedData.first_name || "",
-          parsedData.last_name || "",
-          email,
-          subject,
-          body,
-          cv_link,
-          parsedData.phone || "",
-          parsedData.address || "Casablanca",
-          safeJSON(parsedData.education),
-          safeJSON(parsedData.experience),
-          safeJSON(parsedData.skills)
-        ]);
-
-        console.log("✅ Email enregistré :", email);
-
-      } catch (err) {
-        console.error("❌ Erreur traitement email :", err.message);
+        candidate_id = newC.rows[0].id;
       }
+
+      // 🔥 ATTACHMENT
+      if (filePath) {
+        await client.query(
+          `INSERT INTO attachment (email_id,file_path,type,candidate_id)
+           VALUES ($1,$2,$3,$4)`,
+          [email_id, filePath, "CV", candidate_id]
+        );
+      }
+
+      // 🔥 APPLICATION
+      await client.query(
+        `INSERT INTO application (status, applied_date, source, email_id, candidate_id)
+         VALUES ($1,NOW(),$2,$3,$4)`,
+        ["RECEIVED", "EMAIL", email_id, candidate_id]
+      );
+
+      await client.query('COMMIT');
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error(err);
+    } finally {
+      client.release();
     }
-
-    connection.end();
-
-  } catch (err) {
-    console.error("❌ IMAP ERROR:", err);
   }
+
+  connection.end();
 };

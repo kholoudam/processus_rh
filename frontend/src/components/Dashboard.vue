@@ -8,9 +8,11 @@
 
       <div class="filters">
         <input v-model="searchText" placeholder="Nom..." class="form-control" />
-        <select v-model="selectedJob" class="form-select">
+        <select v-model="selectedJobId" class="form-select">
           <option value="">Tous les postes</option>
-          <option v-for="job in jobs" :key="job">{{ job }}</option>
+          <option v-for="job in jobs" :key="job.id" :value="job.id">
+            {{ job.title }}
+          </option>
         </select>
       </div>
 
@@ -29,7 +31,8 @@
             <tr v-for="c in filteredCandidates" :key="c.id">
               <td>{{ c.name || '---' }}</td>
               <td>{{ c.email || '---' }}</td>
-              <td>{{ c.subject || 'Non défini' }}</td>
+              <!-- Poste vient maintenant de job.title via la table matching -->
+              <td>{{ c.job_title || c.subject || 'Non défini' }}</td>
               <td>
                 <span class="badge"
                   :class="{
@@ -81,7 +84,8 @@
 
         <div class="modal-body">
           <p><strong>Email :</strong> {{ selectedCandidate.email }}</p>
-          <p><strong>Poste :</strong> {{ selectedCandidate.subject || 'Non défini' }}</p>
+          <!-- Affiche job_title (DB) en priorité, fallback sur subject (email) -->
+          <p><strong>Poste :</strong> {{ selectedCandidate.job_title || selectedCandidate.subject || 'Non défini' }}</p>
           <p><strong>Téléphone :</strong> {{ selectedCandidate.phone || '-' }}</p>
           <p><strong>Adresse :</strong> {{ selectedCandidate.address || '-' }}</p>
 
@@ -184,84 +188,93 @@
 </template>
 
 <script>
-import Jobs from "./Jobs.vue"
-import Admis from "./Admis.vue"
+import Jobs    from "./Jobs.vue"
+import Admis   from "./Admis.vue"
 import Refuses from "./Refuses.vue"
 import Matching from "./Matching.vue"
 
 export default {
   components: { Jobs, Admis, Refuses, Matching },
 
-  // ✅ FIX : currentPage est maintenant une DATA locale, plus une prop.
-  // C'est App.vue (via le sidebar) qui la contrôle via :currentPage (prop).
-  // Dashboard reçoit la valeur et l'affiche — il ne la modifie pas lui-même.
   props: {
     currentPage: { type: String, default: 'dashboard' }
   },
 
   data() {
     return {
-      candidates: [],
+      candidates:        [],
+      jobs:              [],       // [{ id, title }] depuis /api/jobs (base de données)
+      selectedJobId:     "",       // id du job sélectionné dans le filtre
       selectedCandidate: { skills: [], experience: [], education: [], cv_link: null, body: "" },
-      showModal: false,
+      showModal:         false,
 
       // Refus
       showRejectModal: false,
-      rejectTarget: null,
-      rejectReason: "",
+      rejectTarget:    null,
+      rejectReason:    "",
 
       actionLoading: false,
-
-      searchText: "",
-      selectedJob: "",
-      jobs: [],
+      searchText:    "",
 
       toast: { show: false, message: "", type: "success" }
     }
   },
 
   mounted() {
+    this.fetchJobs()
     this.fetchCandidates()
   },
 
   computed: {
     filteredCandidates() {
+      const q = this.searchText.toLowerCase()
       return (this.candidates || []).filter(c => {
-        const name = (c.name || "").toLowerCase()
-        return (
-          name.includes(this.searchText.toLowerCase()) &&
-          (this.selectedJob ? c.subject === this.selectedJob : true)
-        )
+        const nameMatch = (c.name || "").toLowerCase().includes(q)
+        // Filtre par job_id si un poste est sélectionné
+        const jobMatch  = this.selectedJobId
+          ? String(c.job_id) === String(this.selectedJobId)
+          : true
+        return nameMatch && jobMatch
       })
     }
   },
 
   methods: {
 
-    // ── Fetch liste ──
+    // ── Charger les jobs depuis la base de données ──
+    async fetchJobs() {
+      try {
+        const res  = await fetch("http://localhost:3000/api/jobs")
+        const data = await res.json()
+        this.jobs  = Array.isArray(data) ? data : []
+      } catch (err) {
+        console.error("FETCH JOBS ERROR:", err)
+      }
+    },
+
+    // ── Charger les candidats (avec job_title et job_id joints) ──
     async fetchCandidates() {
       try {
-        const res = await fetch("http://localhost:3000/api/candidates")
+        const res  = await fetch("http://localhost:3000/api/candidates")
         const data = await res.json()
         this.candidates = Array.isArray(data) ? data : []
-        this.jobs = [...new Set(this.candidates.map(c => c.subject).filter(Boolean))]
       } catch (err) {
-        console.error("FETCH ERROR:", err)
+        console.error("FETCH CANDIDATES ERROR:", err)
       }
     },
 
     // ── Ouvrir modal détails ──
     async openModal(c) {
       try {
-        const res = await fetch(`http://localhost:3000/api/candidates/${c.id}/details`)
+        const res  = await fetch(`http://localhost:3000/api/candidates/${c.id}/details`)
         const data = await res.json()
         this.selectedCandidate = {
           ...data.candidate,
-          skills: (data.skills || []).map(s => s.skill_name),
-          experience: data.experience || [],
-          education: data.education || [],
-          cv_link: data.candidate.cv_link || null,
-          body: data.candidate.body || ""
+          skills:     (data.skills     || []).map(s => s.skill_name),
+          experience: data.experience  || [],
+          education:  data.education   || [],
+          cv_link:    data.candidate.cv_link || null,
+          body:       data.candidate.body    || ""
         }
         this.showModal = true
       } catch (err) {
@@ -279,9 +292,7 @@ export default {
       if (!confirm("Confirmer l'acceptation de ce candidat ?")) return
       this.actionLoading = true
       try {
-        const res = await fetch(`http://localhost:3000/api/candidates/${id}/accept`, {
-          method: "POST"
-        })
+        const res  = await fetch(`http://localhost:3000/api/candidates/${id}/accept`, { method: "POST" })
         const data = await res.json()
         if (!res.ok) throw new Error(data.message)
         this.showToast("✅ Candidat accepté et email envoyé !", "success")
@@ -304,8 +315,8 @@ export default {
 
     closeRejectModal() {
       this.showRejectModal = false
-      this.rejectTarget = null
-      this.rejectReason = ""
+      this.rejectTarget    = null
+      this.rejectReason    = ""
     },
 
     // ── Confirmer refus ──
@@ -313,7 +324,7 @@ export default {
       if (!this.rejectTarget) return
       this.actionLoading = true
       try {
-        const res = await fetch(`http://localhost:3000/api/candidates/${this.rejectTarget.id}/reject`, {
+        const res  = await fetch(`http://localhost:3000/api/candidates/${this.rejectTarget.id}/reject`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reason: this.rejectReason })

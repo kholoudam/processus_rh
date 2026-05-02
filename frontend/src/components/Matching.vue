@@ -67,7 +67,7 @@
             <tr
               v-for="(m, index) in filtered"
               :key="m.candidateId + '-' + m.jobId"
-              :class="rowClass(m.score)"
+              :class="rowClass(m.scorePercent)"
             >
               <td class="rank">{{ index + 1 }}</td>
               <td>
@@ -79,19 +79,19 @@
                 <span class="job-badge">{{ m.jobTitle }}</span>
               </td>
               <td>
-                <span class="score-pill" :class="scorePillClass(m.score)">
-                  {{ m.score }} pts
+                <span class="score-pill" :class="scorePillClass(m.scorePercent)">
+                  {{ m.scorePercent }}%
                 </span>
               </td>
               <td>
                 <div class="progress-bar-wrap">
                   <div
                     class="progress-bar-fill"
-                    :style="{ width: progressWidth(m.score) + '%' }"
-                    :class="scorePillClass(m.score)"
+                    :style="{ width: m.scorePercent + '%' }"
+                    :class="scorePillClass(m.scorePercent)"
                   ></div>
                 </div>
-                <small>{{ progressWidth(m.score) }}%</small>
+                <small>{{ m.scorePercent }}%</small>
               </td>
               <td>
                 <div class="matched-tags">
@@ -100,6 +100,7 @@
                     :key="i"
                     class="tag"
                   >{{ item }}</span>
+                  <span v-if="!m.matchedItems || m.matchedItems.length === 0" class="tag tag-empty">—</span>
                 </div>
               </td>
             </tr>
@@ -117,19 +118,26 @@ export default {
 
   data() {
     return {
-      matches:       [],
+      allMatches:    [],   // toutes les données brutes de l'API
       jobs:          [],
       selectedJobId: '',
       searchText:    '',
       loading:       false,
       error:         null,
-      maxScore:      0,
     }
   },
 
   computed: {
+    // 1. Filtre par poste sélectionné
+    matches() {
+      if (!this.selectedJobId) return this.allMatches
+      return this.allMatches.filter(m => String(m.jobId) === String(this.selectedJobId))
+    },
+
+    // 2. Filtre par recherche texte
     filtered() {
-      const q = this.searchText.toLowerCase()
+      const q = this.searchText.toLowerCase().trim()
+      if (!q) return this.matches
       return this.matches.filter(m =>
         (m.candidateName  || '').toLowerCase().includes(q) ||
         (m.candidateEmail || '').toLowerCase().includes(q) ||
@@ -145,7 +153,6 @@ export default {
 
   methods: {
 
-    // ── Charger la liste des jobs pour le sélecteur ────────────
     async fetchJobs() {
       try {
         const res  = await fetch('http://localhost:3000/api/jobs')
@@ -156,45 +163,46 @@ export default {
       }
     },
 
-    // ── Lancer le matching (tous ou par job) ───────────────────
     async fetchMatches() {
-    try {
-        const res = await fetch("http://localhost:3000/api/match")
+      this.loading = true
+      this.error   = null
+      try {
+        const res  = await fetch('http://localhost:3000/api/match')
         const data = await res.json()
 
-        console.log("MATCHES:", data)
+        console.log('MATCHES RAW:', data)
 
-        // ❌ AVANT: ça supprimait tout
-        // this.matches = data.filter(m => m.score > 0)
+        if (!Array.isArray(data)) {
+          this.error = 'Réponse inattendue du serveur.'
+          this.allMatches = []
+          return
+        }
 
-        // ✅ FIX
-        this.matches = data || []
-
-    } catch (err) {
-        console.error("MATCH ERROR:", err)
-    }
+        // On garde tous les résultats (y compris score=0)
+        // mais on filtre les doublons éventuels
+        this.allMatches = data
+      } catch (err) {
+        console.error('MATCH ERROR:', err)
+        this.error = 'Impossible de contacter le serveur de matching.'
+      } finally {
+        this.loading = false
+      }
     },
 
     onJobChange() {
-      this.fetchMatches()
+      // Le computed `matches` se recalcule automatiquement — pas besoin de refetch
+      this.searchText = ''
     },
 
-    // ── Score → largeur barre de progression (%) ───────────────
-    progressWidth(score) {
-      if (!this.maxScore) return 0
-      return Math.round((score / this.maxScore) * 100)
-    },
-
-    // ── Classe CSS selon le score ──────────────────────────────
-    scorePillClass(score) {
-      if (score >= 45) return 'high'
-      if (score >= 20) return 'medium'
+    scorePillClass(pct) {
+      if (pct >= 60) return 'high'
+      if (pct >= 30) return 'medium'
       return 'low'
     },
 
-    rowClass(score) {
-      if (score >= 45) return 'row-high'
-      if (score >= 20) return 'row-medium'
+    rowClass(pct) {
+      if (pct >= 60) return 'row-high'
+      if (pct >= 30) return 'row-medium'
       return ''
     }
   }
@@ -295,6 +303,7 @@ tbody tr:hover { background: #f0f9ff; }
   background: #f3f4f6; color: #374151; font-size: 11px;
   padding: 2px 7px; border-radius: 4px; border: 1px solid #e5e7eb;
 }
+.tag-empty { color: #9ca3af; border-style: dashed; }
 
 /* ── States ── */
 .loading {

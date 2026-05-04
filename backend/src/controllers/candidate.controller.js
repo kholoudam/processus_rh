@@ -37,17 +37,34 @@ const sendMailSafe = async (options) => {
 exports.getCandidates = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT 
+      SELECT DISTINCT ON (c.id)
         c.id,
         c.name,
         c.email,
         c.phone,
         c.address,
         c.status,
-        e.subject
+        e.subject,
+        j.id    AS job_id,
+        j.title AS job_title
       FROM candidate c
-      LEFT JOIN application a ON a.candidate_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT a.email_id
+        FROM application a
+        WHERE a.candidate_id = c.id
+        ORDER BY a.id DESC
+        LIMIT 1
+      ) a ON true
       LEFT JOIN email e ON e.id = a.email_id
+      LEFT JOIN LATERAL (
+        SELECT m.job_id
+        FROM matching m
+        WHERE m.candidate_id = c.id
+        ORDER BY m.score DESC
+        LIMIT 1
+      ) best ON true
+      LEFT JOIN job j ON j.id = best.job_id
+      WHERE c.status NOT IN ('ACCEPTED', 'REJECTED')
       ORDER BY c.id DESC
     `);
     res.json(result.rows || []);
@@ -205,7 +222,7 @@ exports.rejectCandidate = async (req, res) => {
 exports.getAdmis = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT
+      SELECT DISTINCT ON (ad.candidate_id)
         ad.id,
         ad.candidate_id,
         ad.accepted_at,
@@ -216,9 +233,13 @@ exports.getAdmis = async (req, res) => {
         e.subject
       FROM admis ad
       JOIN candidate c ON c.id = ad.candidate_id
-      LEFT JOIN application a ON a.candidate_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT a.email_id FROM application a
+        WHERE a.candidate_id = c.id
+        ORDER BY a.id DESC LIMIT 1
+      ) a ON true
       LEFT JOIN email e ON e.id = a.email_id
-      ORDER BY ad.accepted_at DESC
+      ORDER BY ad.candidate_id, ad.accepted_at DESC
     `);
     res.json(result.rows || []);
   } catch (err) {
@@ -234,7 +255,7 @@ exports.getAdmis = async (req, res) => {
 exports.getRefuses = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT
+      SELECT DISTINCT ON (rf.candidate_id)
         rf.id,
         rf.candidate_id,
         rf.reason,
@@ -246,9 +267,13 @@ exports.getRefuses = async (req, res) => {
         e.subject
       FROM refuses rf
       JOIN candidate c ON c.id = rf.candidate_id
-      LEFT JOIN application a ON a.candidate_id = c.id
+      LEFT JOIN LATERAL (
+        SELECT a.email_id FROM application a
+        WHERE a.candidate_id = c.id
+        ORDER BY a.id DESC LIMIT 1
+      ) a ON true
       LEFT JOIN email e ON e.id = a.email_id
-      ORDER BY rf.refused_at DESC
+      ORDER BY rf.candidate_id, rf.refused_at DESC
     `);
     res.json(result.rows || []);
   } catch (err) {

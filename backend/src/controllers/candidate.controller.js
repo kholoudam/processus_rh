@@ -5,7 +5,7 @@ const nodemailer = require('nodemailer');
 // MAILER CONFIG
 // ===============================
 const createTransporter = () => {
-  if (!process.env.MAIL_USER || !process.env.MAIL_PASS) {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
     console.warn('⚠️  MAIL_USER ou MAIL_PASS non définis — les emails ne seront pas envoyés.');
     return null;
   }
@@ -14,8 +14,8 @@ const createTransporter = () => {
     port: parseInt(process.env.MAIL_PORT) || 587,
     secure: false,
     auth: {
-      user: process.env.MAIL_USER,
-      pass: process.env.MAIL_PASS,
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
     },
   });
 };
@@ -137,13 +137,20 @@ exports.acceptCandidate = async (req, res) => {
       return res.status(404).json({ message: "Candidat introuvable" });
     }
 
-    const subjectRes = await pool.query(`
-      SELECT e.subject FROM email e
+    // Récupère le sender depuis la table email (adresse utilisée pour envoyer le CV)
+    const emailRes = await pool.query(`
+      SELECT e.subject, e.sender FROM email e
       JOIN application a ON a.email_id = e.id
-      WHERE a.candidate_id = $1 LIMIT 1
+      WHERE a.candidate_id = $1
+      ORDER BY e.id DESC LIMIT 1
     `, [id]);
 
-    const subject = subjectRes.rows[0]?.subject || "le poste";
+    const subject     = emailRes.rows[0]?.subject || "le poste";
+    const senderEmail = emailRes.rows[0]?.sender;
+
+    if (!senderEmail) {
+      console.warn(`⚠️  Aucun sender trouvé dans la table email pour candidate_id=${id}`);
+    }
 
     await pool.query("UPDATE candidate SET status='ACCEPTED' WHERE id=$1", [id]);
 
@@ -154,10 +161,10 @@ exports.acceptCandidate = async (req, res) => {
     `, [id]);
 
     await sendMailSafe({
-      from: `"RH" <${process.env.MAIL_USER}>`,
-      to: candidate.email,
+      from: `"RH" <${process.env.EMAIL_USER}>`,
+      to: senderEmail,
       subject: "Candidature acceptée",
-      html: `<p>Félicitations ${candidate.name}, vous êtes accepté pour ${subject}</p>`
+      html: `<p>Félicitations ${candidate.name},</p><p>Nous avons le plaisir de vous informer que votre candidature pour le poste de <strong>${subject}</strong> a été retenue. Nous vous contacterons prochainement.</p><p>Cordialement,<br>L'équipe RH</p>`
     });
 
     res.json({ message: "OK" });
@@ -182,13 +189,20 @@ exports.rejectCandidate = async (req, res) => {
       return res.status(404).json({ message: "Candidat introuvable" });
     }
 
-    const subjectRes = await pool.query(`
-      SELECT e.subject FROM email e
+    // Récupère le sender depuis la table email (adresse utilisée pour envoyer le CV)
+    const emailRes = await pool.query(`
+      SELECT e.subject, e.sender FROM email e
       JOIN application a ON a.email_id = e.id
-      WHERE a.candidate_id = $1 LIMIT 1
+      WHERE a.candidate_id = $1
+      ORDER BY e.id DESC LIMIT 1
     `, [id]);
 
-    const subject = subjectRes.rows[0]?.subject || "le poste";
+    const subject     = emailRes.rows[0]?.subject || "le poste";
+    const senderEmail = emailRes.rows[0]?.sender;
+
+    if (!senderEmail) {
+      console.warn(`⚠️  Aucun sender trouvé dans la table email pour candidate_id=${id}`);
+    }
 
     await pool.query("UPDATE candidate SET status='REJECTED' WHERE id=$1", [id]);
 
@@ -199,10 +213,10 @@ exports.rejectCandidate = async (req, res) => {
     `, [id, reason || null]);
 
     await sendMailSafe({
-      from: `"RH" <${process.env.MAIL_USER}>`,
-      to: candidate.email,
+      from: `"RH" <${process.env.EMAIL_USER}>`,
+      to: senderEmail,
       subject: "Candidature refusée",
-      html: `<p>Bonjour ${candidate.name}, votre candidature pour ${subject} est refusée.</p>`
+      html: `<p>Bonjour ${candidate.name},</p><p>Après examen de votre candidature pour le poste de <strong>${subject}</strong>, nous ne sommes malheureusement pas en mesure de donner une suite favorable.${reason ? '<br><br><em>Motif : ' + reason + '</em>' : ''}</p><p>Nous vous remercions de l'intérêt porté à notre entreprise.</p><p>Cordialement,<br>L'équipe RH</p>`
     });
 
     res.json({ message: "OK" });

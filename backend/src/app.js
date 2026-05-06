@@ -1,66 +1,103 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
+require("dotenv").config();
+
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
 
-// ===============================
-// 🔧 MIDDLEWARES
-// ===============================
+/* ===============================
+   MIDDLEWARES
+=============================== */
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true }));
 
-// ===============================
-// 📁 UPLOADS (CHEMIN ABSOLU)
-// ===============================
-const uploadsPath = path.resolve(__dirname, '../uploads');
-// const matchingRoutes = require('./routes/matching.routes');
+/* ===============================
+   DOSSIER UPLOADS
+=============================== */
+const uploadsPath = path.resolve(__dirname, "../uploads");
 
-console.log("📁 Uploads SERVED FROM:", uploadsPath);
-
-// 🔍 Vérification dossier
 if (!fs.existsSync(uploadsPath)) {
-  console.error("❌ Dossier uploads introuvable !");
-} else {
-  console.log("✅ Uploads OK");
-  console.log("📄 Fichiers:", fs.readdirSync(uploadsPath));
+  fs.mkdirSync(uploadsPath, { recursive: true });
 }
 
-// ===============================
-// 🔥 SERVIR LES FICHIERS (CV)
-// ===============================
-app.use('/uploads', express.static(uploadsPath));
+app.use("/uploads", express.static(uploadsPath));
 
-// ===============================
-// 🚀 ROUTES API
-// ===============================
-app.use('/api/emails', require('./routes/email.routes'));
-app.use('/api/jobs', require('./routes/job.routes'));
-app.use('/api/candidates', require('./routes/candidate.routes'));
-//app.use('/api/match', matchingRoutes);
-app.use("/api/match", require("./routes/matching.routes"))
+console.log("📁 Uploads:", uploadsPath);
 
-// ===============================
-// 🧪 TEST API
-// ===============================
-app.get('/', (req, res) => {
-  res.send("✅ API WORKING");
+/* ===============================
+   ROUTES API
+=============================== */
+try {
+  app.use("/api/emails", require("./routes/email.routes"));
+} catch (err) {
+  console.log("⚠ email.routes absent");
+}
+
+try {
+  app.use("/api/jobs", require("./routes/job.routes"));
+} catch (err) {
+  console.log("⚠ job.routes absent");
+}
+
+try {
+  app.use("/api/candidates", require("./routes/candidate.routes"));
+} catch (err) {
+  console.log("⚠ candidate.routes absent");
+}
+
+try {
+  app.use("/api/match", require("./routes/matching.routes"));
+} catch (err) {
+  console.log("⚠ matching.routes absent");
+}
+
+/* ===============================
+   TEST ROUTE
+=============================== */
+app.get("/", (req, res) => {
+  res.send("🚀 Backend RH running");
 });
 
-// ===============================
-// ❌ 404 HANDLER
-// ===============================
+/* ===============================
+   EMAIL WATCHER AUTO
+=============================== */
+try {
+  const { startEmailWatcher } = require("./services/email.service");
+
+  if (startEmailWatcher) {
+    startEmailWatcher();
+    console.log("📩 Email watcher démarré");
+  } else {
+    console.log("⚠ startEmailWatcher non trouvé");
+  }
+} catch (err) {
+  console.error("❌ Email watcher error:", err.message);
+}
+
+/* ===============================
+   404
+=============================== */
 app.use((req, res) => {
-  res.status(404).json({ message: "Route introuvable" });
+  res.status(404).json({
+    success: false,
+    message: "Route introuvable"
+  });
 });
 
-// ===============================
-// ❌ ERROR HANDLER GLOBAL
-// ===============================
+/* ===============================
+   ERROR HANDLER
+=============================== */
 app.use((err, req, res, next) => {
-  console.error("❌ SERVER ERROR:", err);
-  res.status(500).json({ message: "Erreur serveur" });
+  console.error("SERVER ERROR:", err);
+
+  res.status(500).json({
+    success: false,
+    message: "Erreur serveur",
+    error: err.message
+  });
 });
 
 module.exports = app;

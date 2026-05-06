@@ -1,329 +1,154 @@
 <template>
-  <div class="matching-page">
-
-    <h3 class="page-title">🎯 Matching Candidats / Postes</h3>
-
-    <!-- ── Sélecteur de poste ── -->
-    <div class="toolbar">
-      <div class="select-wrap">
-        <label>Filtrer par poste :</label>
-        <select v-model="selectedJobId" @change="onJobChange">
-          <option value="">— Tous les postes —</option>
-          <option v-for="job in jobs" :key="job.id" :value="job.id">
-            {{ job.title }}
-          </option>
-        </select>
+  <div class="page-wrapper">
+    <div class="page-header">
+      <div>
+        <h4 class="page-title">Matching Candidats / Postes</h4>
+        <p class="page-sub">Score de compatibilité calculé par TF-IDF</p>
       </div>
-
-      <input
-        v-model="searchText"
-        class="search-input"
-        placeholder="🔍 Rechercher un candidat..."
-      />
-
       <button class="btn-refresh" @click="fetchMatches" :disabled="loading">
-        <span v-if="loading">⏳</span>
-        <span v-else>🔄 Actualiser</span>
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Actualiser
       </button>
     </div>
 
-    <!-- ── Loading ── -->
-    <div v-if="loading" class="loading">
-      <div class="spinner"></div>
-      <p>Calcul des correspondances en cours...</p>
-    </div>
-
-    <!-- ── Erreur ── -->
-    <div v-else-if="error" class="error-state">
-      ⚠️ {{ error }}
-    </div>
-
-    <!-- ── Aucun résultat ── -->
-    <div v-else-if="filtered.length === 0" class="empty-state">
-      <p>😕 Aucune correspondance trouvée.</p>
-      <small>Assurez-vous que les offres ont une description et que les candidats ont des compétences renseignées.</small>
-    </div>
-
-    <!-- ── Résultats ── -->
-    <div v-else>
-      <p class="result-count">
-        <strong>{{ filtered.length }}</strong> correspondance(s) trouvée(s)
-      </p>
-
-      <div class="table-responsive">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>Candidat</th>
-              <th>Email</th>
-              <th>Poste</th>
-              <th>Score</th>
-              <th>Compatibilité</th>
-              <th>Éléments matchés</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(m, index) in filtered"
-              :key="m.candidateId + '-' + m.jobId"
-              :class="rowClass(m.scorePercent)"
-            >
-              <td class="rank">{{ index + 1 }}</td>
-              <td>
-                <span class="candidate-name">{{ m.candidateName }}</span>
-                <small v-if="m.candidatePhone" class="phone">{{ m.candidatePhone }}</small>
-              </td>
-              <td>{{ m.candidateEmail }}</td>
-              <td>
-                <span class="job-badge">{{ m.jobTitle }}</span>
-              </td>
-              <td>
-                <span class="score-pill" :class="scorePillClass(m.scorePercent)">
-                  {{ m.scorePercent }}%
-                </span>
-              </td>
-              <td>
-                <div class="progress-bar-wrap">
-                  <div
-                    class="progress-bar-fill"
-                    :style="{ width: m.scorePercent + '%' }"
-                    :class="scorePillClass(m.scorePercent)"
-                  ></div>
-                </div>
-                <small>{{ m.scorePercent }}%</small>
-              </td>
-              <td>
-                <div class="matched-tags">
-                  <span
-                    v-for="(item, i) in m.matchedItems"
-                    :key="i"
-                    class="tag"
-                  >{{ item }}</span>
-                  <span v-if="!m.matchedItems || m.matchedItems.length === 0" class="tag tag-empty">—</span>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+    <div class="card-surface mb-3">
+      <div class="filter-row">
+        <div class="select-wrap">
+          <label>Poste :</label>
+          <select v-model="selectedJobId" class="f-select" @change="searchText=''">
+            <option value="">Tous les postes</option>
+            <option v-for="job in jobs" :key="job.id" :value="job.id">{{ job.title }}</option>
+          </select>
+        </div>
+        <input v-model="searchText" class="f-input" placeholder="Rechercher un candidat..." />
+        <span v-if="filtered.length" class="result-count">{{ filtered.length }} résultat(s)</span>
       </div>
     </div>
 
+    <div v-if="loading" class="state-box">
+      <div class="spinner"></div>
+      <p>Calcul des correspondances...</p>
+    </div>
+    <div v-else-if="error" class="error-box">{{ error }}</div>
+    <div v-else-if="filtered.length === 0" class="state-box">
+      Aucune correspondance trouvée. Assurez-vous que les offres ont une description et que les candidats ont des compétences renseignées.
+    </div>
+    <div v-else class="card-surface p-0">
+      <table class="data-table">
+        <thead>
+          <tr><th>#</th><th>Candidat</th><th>Poste</th><th>Compatibilité</th><th>Score</th><th>Mots-clés</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(m, i) in filtered" :key="m.candidateId+'-'+m.jobId" :class="rowClass(m.scorePercent)">
+            <td class="rank">{{ i+1 }}</td>
+            <td>
+              <div class="cand-cell">
+                <div class="avatar">{{ initials(m.candidateName) }}</div>
+                <div>
+                  <div class="cand-name">{{ m.candidateName }}</div>
+                  <div class="cand-email">{{ m.candidateEmail }}</div>
+                </div>
+              </div>
+            </td>
+            <td><span class="job-badge">{{ m.jobTitle }}</span></td>
+            <td>
+              <div class="prog-wrap">
+                <div class="prog-track">
+                  <div class="prog-fill" :class="pillClass(m.scorePercent)" :style="{width:m.scorePercent+'%'}"></div>
+                </div>
+                <span class="prog-pct">{{ m.scorePercent }}%</span>
+              </div>
+            </td>
+            <td><span class="score-pill" :class="pillClass(m.scorePercent)">{{ m.scorePercent }}%</span></td>
+            <td>
+              <div class="tags-row">
+                <span v-for="(t,ti) in (m.matchedItems||[]).slice(0,5)" :key="ti" class="match-tag">{{ t }}</span>
+                <span v-if="!m.matchedItems||m.matchedItems.length===0" class="muted">—</span>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
 <script>
 export default {
   name: 'Matching',
-
-  data() {
-    return {
-      allMatches:    [],   // toutes les données brutes de l'API
-      jobs:          [],
-      selectedJobId: '',
-      searchText:    '',
-      loading:       false,
-      error:         null,
-    }
-  },
-
+  data() { return { allMatches:[], jobs:[], selectedJobId:'', searchText:'', loading:false, error:null } },
   computed: {
-    // 1. Filtre par poste sélectionné
-    matches() {
-      if (!this.selectedJobId) return this.allMatches
-      return this.allMatches.filter(m => String(m.jobId) === String(this.selectedJobId))
-    },
-
-    // 2. Filtre par recherche texte
+    matches() { return this.selectedJobId ? this.allMatches.filter(m=>String(m.jobId)===String(this.selectedJobId)) : this.allMatches },
     filtered() {
       const q = this.searchText.toLowerCase().trim()
       if (!q) return this.matches
-      return this.matches.filter(m =>
-        (m.candidateName  || '').toLowerCase().includes(q) ||
-        (m.candidateEmail || '').toLowerCase().includes(q) ||
-        (m.jobTitle       || '').toLowerCase().includes(q)
-      )
+      return this.matches.filter(m=>(m.candidateName||'').toLowerCase().includes(q)||(m.candidateEmail||'').toLowerCase().includes(q)||(m.jobTitle||'').toLowerCase().includes(q))
     }
   },
-
-  mounted() {
-    this.fetchJobs()
-    this.fetchMatches()
-  },
-
+  mounted() { this.fetchJobs(); this.fetchMatches() },
   methods: {
-
     async fetchJobs() {
-      try {
-        const res  = await fetch('http://localhost:3000/api/jobs')
-        const data = await res.json()
-        this.jobs  = Array.isArray(data) ? data : []
-      } catch (err) {
-        console.error('JOBS ERROR:', err)
-      }
+      try { const r=await fetch('http://localhost:3000/api/jobs'); const d=await r.json(); this.jobs=Array.isArray(d)?d:[] } catch(e){}
     },
-
     async fetchMatches() {
-      this.loading = true
-      this.error   = null
+      this.loading=true; this.error=null
       try {
-        const res  = await fetch('http://localhost:3000/api/match')
-        const data = await res.json()
-
-        console.log('MATCHES RAW:', data)
-
-        if (!Array.isArray(data)) {
-          this.error = 'Réponse inattendue du serveur.'
-          this.allMatches = []
-          return
-        }
-
-        // On garde tous les résultats (y compris score=0)
-        // mais on filtre les doublons éventuels
-        this.allMatches = data
-      } catch (err) {
-        console.error('MATCH ERROR:', err)
-        this.error = 'Impossible de contacter le serveur de matching.'
-      } finally {
-        this.loading = false
-      }
+        const r=await fetch('http://localhost:3000/api/match'); const d=await r.json()
+        if(!Array.isArray(d)) { this.error='Réponse inattendue du serveur.'; this.allMatches=[]; return }
+        this.allMatches=d
+      } catch(e) { this.error='Impossible de contacter le serveur de matching.' } finally { this.loading=false }
     },
-
-    onJobChange() {
-      // Le computed `matches` se recalcule automatiquement — pas besoin de refetch
-      this.searchText = ''
-    },
-
-    scorePillClass(pct) {
-      if (pct >= 60) return 'high'
-      if (pct >= 30) return 'medium'
-      return 'low'
-    },
-
-    rowClass(pct) {
-      if (pct >= 60) return 'row-high'
-      if (pct >= 30) return 'row-medium'
-      return ''
-    }
+    pillClass(p) { return p>=60?'high':p>=30?'medium':'low' },
+    rowClass(p) { return p>=60?'row-high':p>=30?'row-medium':'' },
+    initials(n) { if(!n) return '?'; return n.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase() }
   }
 }
 </script>
 
 <style scoped>
-.matching-page { padding: 24px; background: #f8fafc; min-height: 100vh; }
-
-.page-title {
-  font-size: 22px; font-weight: 700; color: #1e40af; margin-bottom: 20px;
-}
-
-/* ── Toolbar ── */
-.toolbar {
-  display: flex; align-items: center; gap: 14px;
-  flex-wrap: wrap; margin-bottom: 20px;
-}
-
-.select-wrap {
-  display: flex; align-items: center; gap: 8px;
-}
-.select-wrap label { font-size: 14px; color: #374151; font-weight: 500; white-space: nowrap; }
-.select-wrap select {
-  padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 8px;
-  font-size: 14px; background: white; outline: none; min-width: 200px;
-}
-.select-wrap select:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }
-
-.search-input {
-  padding: 8px 14px; border: 1px solid #d1d5db; border-radius: 8px;
-  font-size: 14px; width: 240px; outline: none;
-}
-.search-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px #bfdbfe; }
-
-.btn-refresh {
-  padding: 8px 18px; background: #1d4ed8; color: white;
-  border: none; border-radius: 8px; font-size: 14px; cursor: pointer;
-  transition: background 0.2s;
-}
-.btn-refresh:hover:not(:disabled) { background: #1e40af; }
-.btn-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* ── Result count ── */
-.result-count { font-size: 14px; color: #6b7280; margin-bottom: 12px; }
-
-/* ── Table ── */
-.table {
-  width: 100%; border-collapse: collapse; background: white;
-  border-radius: 12px; overflow: hidden;
-  box-shadow: 0 2px 16px rgba(0,0,0,0.07);
-}
-thead { background: #1e3a8a; color: white; }
-th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid #e5e7eb; }
-tbody tr:hover { background: #f0f9ff; }
-
-.row-high   { background: #f0fdf4; }
-.row-medium { background: #fffbeb; }
-
-.rank { font-weight: 700; color: #6b7280; font-size: 13px; }
-
-/* ── Candidate ── */
-.candidate-name { font-weight: 600; color: #111827; display: block; }
-.phone { color: #9ca3af; font-size: 12px; }
-
-/* ── Job badge ── */
-.job-badge {
-  background: #dbeafe; color: #1d4ed8; padding: 3px 10px;
-  border-radius: 20px; font-size: 12px; font-weight: 600;
-  white-space: nowrap;
-}
-
-/* ── Score pill ── */
-.score-pill {
-  padding: 4px 12px; border-radius: 20px; font-weight: 700;
-  font-size: 13px; color: white;
-}
-.score-pill.high,
-.progress-bar-fill.high   { background: #16a34a; }
-.score-pill.medium,
-.progress-bar-fill.medium { background: #d97706; }
-.score-pill.low,
-.progress-bar-fill.low    { background: #6b7280; }
-
-/* ── Progress bar ── */
-.progress-bar-wrap {
-  background: #e5e7eb; border-radius: 99px; height: 8px;
-  width: 120px; overflow: hidden; margin-bottom: 3px;
-}
-.progress-bar-fill {
-  height: 100%; border-radius: 99px;
-  transition: width 0.5s ease;
-}
-
-/* ── Matched tags ── */
-.matched-tags { display: flex; flex-wrap: wrap; gap: 4px; }
-.tag {
-  background: #f3f4f6; color: #374151; font-size: 11px;
-  padding: 2px 7px; border-radius: 4px; border: 1px solid #e5e7eb;
-}
-.tag-empty { color: #9ca3af; border-style: dashed; }
-
-/* ── States ── */
-.loading {
-  text-align: center; padding: 60px 20px; color: #6b7280;
-}
-.spinner {
-  width: 36px; height: 36px; margin: 0 auto 14px;
-  border: 3px solid #e5e7eb; border-top-color: #3b82f6;
-  border-radius: 50%; animation: spin 0.8s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.error-state {
-  padding: 20px; background: #fef2f2; border: 1px solid #fca5a5;
-  border-radius: 8px; color: #dc2626; font-size: 14px;
-}
-.empty-state {
-  text-align: center; padding: 60px 20px; color: #6b7280;
-  background: white; border-radius: 10px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-}
-.empty-state small { display: block; margin-top: 8px; font-size: 13px; }
+.page-wrapper { padding:32px 28px 80px; background:#f8fafc; min-height:100vh; }
+.page-header { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:20px; }
+.page-title { font-size:20px; font-weight:700; color:#0f172a; margin:0; }
+.page-sub { font-size:13px; color:#94a3b8; margin:2px 0 0; }
+.btn-refresh { display:flex; align-items:center; gap:6px; padding:7px 16px; background:white; border:1px solid #e2e8f0; border-radius:7px; font-size:13px; font-weight:500; color:#475569; cursor:pointer; transition:all 0.15s; }
+.btn-refresh:hover:not(:disabled) { background:#0f172a; color:white; border-color:#0f172a; }
+.btn-refresh:disabled { opacity:0.5; cursor:not-allowed; }
+.card-surface { background:white; border:1px solid #e2e8f0; border-radius:10px; padding:14px 16px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
+.p-0{padding:0;} .mb-3{margin-bottom:14px;}
+.filter-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.select-wrap { display:flex; align-items:center; gap:8px; }
+.select-wrap label { font-size:13px; color:#475569; font-weight:500; white-space:nowrap; }
+.f-select { padding:7px 12px; border:1px solid #e2e8f0; border-radius:7px; font-size:13px; outline:none; background:white; min-width:200px; }
+.f-select:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,0.1); }
+.f-input { padding:7px 12px; border:1px solid #e2e8f0; border-radius:7px; font-size:13px; outline:none; width:220px; }
+.f-input:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,0.1); }
+.result-count { font-size:12px; color:#94a3b8; margin-left:auto; }
+.state-box { text-align:center; padding:60px 20px; background:white; border-radius:10px; border:1px solid #e2e8f0; color:#94a3b8; font-size:13px; }
+.error-box { padding:16px 20px; background:#fef2f2; border:1px solid #fca5a5; border-radius:8px; color:#dc2626; font-size:13px; }
+.spinner { width:32px; height:32px; margin:0 auto 12px; border:3px solid #e5e7eb; border-top-color:#3b82f6; border-radius:50%; animation:spin 0.8s linear infinite; }
+@keyframes spin{to{transform:rotate(360deg)}}
+.data-table { width:100%; border-collapse:collapse; font-size:13px; }
+.data-table thead th { background:#f8fafc; color:#64748b; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:0.06em; padding:10px 16px; border-bottom:1px solid #e2e8f0; text-align:left; }
+.data-table tbody td { padding:12px 16px; vertical-align:middle; border-bottom:1px solid #f1f5f9; }
+.data-table tbody tr:last-child td { border-bottom:none; }
+.data-table tbody tr:hover td { background:#f8fafc; }
+.row-high td { background:#f0fdf4; }
+.row-medium td { background:#fffbeb; }
+.rank { font-weight:700; color:#94a3b8; font-size:13px; }
+.cand-cell { display:flex; align-items:center; gap:10px; }
+.avatar { width:32px; height:32px; border-radius:8px; background:#dbeafe; color:#1e40af; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.cand-name { font-weight:600; color:#1e293b; font-size:13px; }
+.cand-email { font-size:11px; color:#94a3b8; }
+.job-badge { background:#dbeafe; color:#1d4ed8; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; white-space:nowrap; }
+.prog-wrap { display:flex; align-items:center; gap:8px; }
+.prog-track { flex:1; background:#f1f5f9; border-radius:99px; height:7px; overflow:hidden; min-width:80px; }
+.prog-fill { height:100%; border-radius:99px; transition:width 0.6s ease; }
+.prog-pct { font-size:11px; color:#64748b; width:30px; flex-shrink:0; }
+.score-pill { padding:3px 10px; border-radius:20px; font-weight:700; font-size:12px; color:white; }
+.high { background:#16a34a; }
+.medium { background:#d97706; }
+.low { background:#94a3b8; }
+.tags-row { display:flex; flex-wrap:wrap; gap:4px; }
+.match-tag { background:#f3f4f6; color:#374151; font-size:11px; padding:2px 7px; border-radius:4px; border:1px solid #e5e7eb; }
+.muted { color:#94a3b8; font-size:13px; }
 </style>

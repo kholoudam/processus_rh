@@ -2,235 +2,83 @@ require("dotenv").config();
 
 const imaps = require("imap-simple");
 const { simpleParser } = require("mailparser");
-const fs = require("fs");
+const fs   = require("fs");
 const path = require("path");
-const pdfParse = require("pdf-parse");
 const { v4: uuidv4 } = require("uuid");
 const pool = require("../config/db");
+const { parseCV } = require("./parser.service");
 
 let watcherStarted = false;
 
 /* =========================
-   EXTRACTION EMAIL
-========================= */
-function extractEmail(text) {
-  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return match ? match[0] : null;
-}
-
-/* =========================
-   EXTRACTION NOM
-========================= */
-function extractNameFromCV(text) {
-  const lines = text
-    .split("\n")
-    .map(l => l.trim())
-    .filter(Boolean);
-
-  for (const line of lines.slice(0, 8)) {
-    if (
-      /^[A-ZÀ-Ÿ][a-zà-ÿ]+(\s[A-ZÀ-Ÿ][a-zà-ÿ]+)+$/.test(line)
-    ) {
-      return line;
-    }
-  }
-
-  return null;
-}
-
-/* =========================
-   EXTRACTION PHONE
-========================= */
-function extractPhone(text) {
-  const match = text.match(/(\+?\d[\d\s\-]{8,15})/);
-  return match ? match[0].trim() : null;
-}
-
-/* =========================
-   EXTRACTION ADRESSE
-========================= */
-function extractAddress(text) {
-  const lines = text.split("\n");
-
-  for (const line of lines) {
-    if (
-      /(casablanca|rabat|fes|tanger|agadir|marrakech|kenitra|meknes|salé)/i.test(line)
-    ) {
-      return line.trim();
-    }
-  }
-
-  return null;
-}
-
-/* =========================
-   EXTRACTION SKILLS DYNAMIQUE
-========================= */
-function extractSkills(text) {
-  const lines = text.split("\n");
-
-  return [...new Set(
-    lines
-      .map(l => l.trim())
-      .filter(Boolean)
-      .filter(l => l.length > 2 && l.length < 40)
-      .filter(l =>
-        /^[A-Za-zÀ-ÿ0-9+#.\-\s]+$/.test(l)
-      )
-      .filter(l =>
-        !/cv|profil|contact|email|phone|experience|education|formation/i.test(l)
-      )
-  )].slice(0, 20);
-}
-
-/* =========================
-   EDUCATION
-========================= */
-function extractEducation(text) {
-  const lines = text.split("\n");
-
-  const education = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    if (
-      /master|licence|bachelor|ingénieur|doctorat|dipl[oô]me/i.test(lines[i])
-    ) {
-      education.push({
-        degree: lines[i]?.trim() || null,
-        institution: lines[i + 1]?.trim() || null,
-        year: lines[i + 2]?.match(/\b(19|20)\d{2}\b/)
-          ? parseInt(lines[i + 2].match(/\b(19|20)\d{2}\b/)[0])
-          : null
-      });
-    }
-  }
-
-  return education;
-}
-
-/* =========================
-   EXPERIENCE
-========================= */
-function extractExperience(text) {
-  const lines = text.split("\n");
-
-  const experiences = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    if (
-      /developer|engineer|analyst|manager|assistant|technicien|stage|intern/i.test(lines[i])
-    ) {
-      experiences.push({
-        position: lines[i]?.trim() || null,
-        company: lines[i + 1]?.trim() || null,
-        duration: lines[i + 2]?.match(/\d{4}\s?-\s?\d{4}|present|présent/i)
-          ? lines[i + 2].trim()
-          : null
-      });
-    }
-  }
-
-  return experiences;
-}
-
-/* =========================
-   FALLBACK PDF
-========================= */
-async function extractPdfText(filepath) {
-  try {
-    const buffer = fs.readFileSync(filepath);
-    const pdf = await pdfParse(buffer);
-    return pdf.text;
-  } catch (err) {
-    console.log("⚠ PDF complexe, extraction brute");
-    return fs.readFileSync(filepath).toString("latin1");
-  }
-}
-
-/* =========================
-   PARSE CV
+   PARSE CV & INSERT EN DB
 ========================= */
 async function parseAndInsertCV(filepath, candidateId, sender) {
   try {
-    const text = await extractPdfText(filepath);
+    const buffer = fs.readFileSync(filepath);
 
-    const name = extractNameFromCV(text);
-    const email = extractEmail(text);
-    const phone = extractPhone(text);
-    const address = extractAddress(text);
+    let parsed;
+    try {
+      parsed = await parseCV(buffer);
+    } catch (err) {
+      console.warn(`⚠ CV ignoré (candidat ${candidateId}): ${err.message}`);
+      return;
+    }
 
+    // Mise à jour candidat — données du CV uniquement, jamais le sender
     await pool.query(
-      `
-      UPDATE candidate
-      SET
-        name=$1,
-        email=$2,
-        phone=$3,
-        address=$4
-      WHERE id=$5
-      `,
+      `UPDATE candidate
+       SET name    = $1,
+           email   = $2,
+           phone   = $3,
+           address = $4
+       WHERE id = $5`,
       [
-        name || sender.split("@")[0],
-        email || sender,
-        phone,
-        address,
+        parsed.name    || null,
+        parsed.email   || null,
+        parsed.phone   || null,
+        parsed.address || null,
         candidateId
       ]
     );
 
-    /* SKILLS */
-    const skills = extractSkills(text);
+    // Skills : COMPÉTENCES + SOFT SKILLS (chaque item = un token individuel)
+    const allSkills = [...(parsed.skills || []), ...(parsed.softSkills || [])];
 
-    for (const skill of skills) {
+    for (const skill of allSkills) {
+      if (!skill || skill.trim().length < 2) continue;
       await pool.query(
-        `
-        INSERT INTO candidate_skill(candidate_id, skill_name)
-        VALUES($1,$2)
-        `,
-        [candidateId, skill]
+        `INSERT INTO candidate_skill(candidate_id, skill_name)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [candidateId, skill.trim()]
       );
     }
 
-    /* EDUCATION */
-    const education = extractEducation(text);
-
-    for (const edu of education) {
+    // Education
+    for (const edu of parsed.education || []) {
+      if (!edu.degree) continue;
       await pool.query(
-        `
-        INSERT INTO education(candidate_id, degree, institution, year)
-        VALUES($1,$2,$3,$4)
-        `,
-        [
-          candidateId,
-          edu.degree,
-          edu.institution,
-          edu.year
-        ]
+        `INSERT INTO education(candidate_id, degree, institution, year)
+         VALUES ($1, $2, $3, $4)`,
+        [candidateId, edu.degree, edu.school || null, null]
       );
     }
 
-    /* EXPERIENCE */
-    const experiences = extractExperience(text);
-
-    for (const exp of experiences) {
+    // Experience
+    for (const exp of parsed.experience || []) {
+      if (!exp.position) continue;
       await pool.query(
-        `
-        INSERT INTO experience(candidate_id, company, position, duration)
-        VALUES($1,$2,$3,$4)
-        `,
-        [
-          candidateId,
-          exp.company,
-          exp.position,
-          exp.duration
-        ]
+        `INSERT INTO experience(candidate_id, company, position, duration)
+         VALUES ($1, $2, $3, $4)`,
+        [candidateId, exp.company || null, exp.position, exp.duration || null]
       );
     }
 
-    console.log("🧠 Parsing CV terminé");
+    console.log(`🧠 CV parsé — candidat ${candidateId} | nom: ${parsed.name || "?"} | skills: ${allSkills.length}`);
 
   } catch (err) {
-    console.error("❌ Parsing CV:", err.message);
+    console.error(`❌ parseAndInsertCV (candidat ${candidateId}):`, err.message);
   }
 }
 
@@ -240,14 +88,12 @@ async function parseAndInsertCV(filepath, candidateId, sender) {
 async function fetchEmails() {
   const config = {
     imap: {
-      user: process.env.EMAIL_USER,
-      password: process.env.EMAIL_PASS,
-      host: process.env.IMAP_HOST,
-      port: process.env.IMAP_PORT,
-      tls: true,
-      tlsOptions: {
-        rejectUnauthorized: false
-      }
+      user:       process.env.EMAIL_USER,
+      password:   process.env.EMAIL_PASS,
+      host:       process.env.IMAP_HOST,
+      port:       parseInt(process.env.IMAP_PORT) || 993,
+      tls:        true,
+      tlsOptions: { rejectUnauthorized: false }
     }
   };
 
@@ -259,67 +105,47 @@ async function fetchEmails() {
 
     const messages = await connection.search(
       ["UNSEEN"],
-      {
-        bodies: [""],
-        markSeen: true,
-        struct: true
-      }
+      { bodies: [""], markSeen: true, struct: true }
     );
 
-    console.log(`📨 ${messages.length} emails trouvés`);
+    console.log(`📨 ${messages.length} email(s) trouvé(s)`);
 
     for (const item of messages) {
       try {
         const all = item.parts.find(p => p.which === "");
         if (!all) continue;
 
-        const parsed = await simpleParser(all.body);
-
-        const sender =
-          parsed.from?.value?.[0]?.address || "unknown@mail.com";
-
+        const parsed  = await simpleParser(all.body);
+        const sender  = parsed.from?.value?.[0]?.address || "unknown@mail.com";
         const subject = parsed.subject || "Sans objet";
-        const body = parsed.text || "";
+        const body    = parsed.text    || "";
 
-        /* EMAIL */
+        // Email (sender stocké pour traçabilité IMAP uniquement)
         const emailInsert = await pool.query(
-          `
-          INSERT INTO email(subject, body, sender)
-          VALUES($1,$2,$3)
-          RETURNING id
-          `,
+          `INSERT INTO email(subject, body, sender)
+           VALUES ($1, $2, $3)
+           RETURNING id`,
           [subject, body, sender]
         );
-
         const emailId = emailInsert.rows[0].id;
 
-        /* CANDIDATE */
+        // Candidat (vide — rempli par parseAndInsertCV depuis le CV)
         const candidateInsert = await pool.query(
-          `
-          INSERT INTO candidate(status)
-          VALUES('RECEIVED')
-          RETURNING id
-          `
+          `INSERT INTO candidate(status) VALUES ('RECEIVED') RETURNING id`
         );
-
         const candidateId = candidateInsert.rows[0].id;
 
-        /* APPLICATION */
+        // Candidature
         await pool.query(
-          `
-          INSERT INTO application(status, applied_date, source, email_id, candidate_id)
-          VALUES('RECEIVED',NOW(),'EMAIL',$1,$2)
-          `,
+          `INSERT INTO application(status, applied_date, source, email_id, candidate_id)
+           VALUES ('RECEIVED', NOW(), 'EMAIL', $1, $2)`,
           [emailId, candidateId]
         );
 
-        /* ATTACHMENTS */
+        // Pièces jointes PDF
         if (parsed.attachments?.length > 0) {
           const uploadDir = path.resolve(__dirname, "../../uploads");
-
-          if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-          }
+          if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
           for (const att of parsed.attachments) {
             if (!att.filename?.toLowerCase().endsWith(".pdf")) continue;
@@ -330,30 +156,19 @@ async function fetchEmails() {
             fs.writeFileSync(filepath, att.content);
 
             await pool.query(
-              `
-              INSERT INTO attachment(email_id,file_path,type,candidate_id)
-              VALUES($1,$2,$3,$4)
-              `,
-              [
-                emailId,
-                `uploads/${filename}`,
-                att.contentType,
-                candidateId
-              ]
+              `INSERT INTO attachment(email_id, file_path, type, candidate_id)
+               VALUES ($1, $2, $3, $4)`,
+              [emailId, `uploads/${filename}`, att.contentType, candidateId]
             );
 
-            await parseAndInsertCV(
-              filepath,
-              candidateId,
-              sender
-            );
+            await parseAndInsertCV(filepath, candidateId, sender);
           }
         }
 
-        console.log("✅ Candidature complète insérée");
+        console.log(`✅ Candidature insérée — candidat ${candidateId}`);
 
       } catch (err) {
-        console.error("❌ Email parsing:", err.message);
+        console.error("❌ Traitement email:", err.message);
       }
     }
 
@@ -365,20 +180,14 @@ async function fetchEmails() {
 }
 
 /* =========================
-   WATCHER
+   WATCHER (toutes les 2 min)
 ========================= */
 function startEmailWatcher() {
   if (watcherStarted) return;
-
   watcherStarted = true;
-
   fetchEmails();
-  setInterval(fetchEmails, 120000);
-
+  setInterval(fetchEmails, 120_000);
   console.log("📩 Email watcher démarré");
 }
 
-module.exports = {
-  fetchEmails,
-  startEmailWatcher
-};
+module.exports = { fetchEmails, startEmailWatcher };

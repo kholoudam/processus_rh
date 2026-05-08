@@ -1,188 +1,398 @@
-const pool = require("../config/db")
-const natural = require("natural")
+const pool = require("../config/db");
 
-const TfIdf = natural.TfIdf
+/* =========================
+   NORMALIZE
+========================= */
+function normalize(str) {
+  return (str || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-exports.matchCandidates = async () => {
-  try {
+/* =========================================================
+   RÉFÉRENTIELS MÉTIER
+   Chaque poste a :
+     - keywords   : mots-clés techniques du domaine
+     - levels     : niveaux d'études acceptés (Bac+2, Bac+3, Bac+5…)
+     - positions  : intitulés de postes d'expérience associés
+   Ces référentiels permettent le matching même quand la
+   description du job est courte.
+========================================================= */
+const JOB_REFERENTIALS = {
+  "preparateur methodes": {
+    keywords: [
+      "catia", "solidworks", "autocad", "cfao", "fao", "sap", "amdec",
+      "gamme", "nomenclature", "industrialisation", "lean", "kaizen",
+      "methode", "process", "fabrication", "composites", "usinage",
+      "cablage", "ewis", "nadcap", "en9100", "easa", "5s", "vam", "vsm",
+      "mastercam", "nx", "siemens", "fibersim", "laminate", "ansys"
+    ],
+    levels: ["bac+2", "bts", "dut", "licence", "bac+3", "bac+5", "master", "ingenieur"],
+    positions: [
+      "preparateur methodes", "technicien methodes", "assistant industrialisation",
+      "ingenieur methodes", "ingenieur process", "charge affaires"
+    ]
+  },
 
-    // =========================
-    // 1. FETCH DATA
-    // =========================
-    const jobsRes = await pool.query(`
-      SELECT id, title, COALESCE(description,'') as description
-      FROM job
-    `)
+  "technicien moyens generaux": {
+    keywords: [
+      "facility", "hvac", "cvc", "climatisation", "plomberie", "electricite",
+      "electrique", "maintenance", "batiment", "infrastructure", "gmao", "sap pm",
+      "iso 14001", "iso 45001", "hse", "securite", "caces", "habilitation",
+      "levage", "manutention", "hydraulique", "pneumatique", "electromecaniq",
+      "sprinkler", "ssi", "cctv", "controle acces", "gestion prestataires",
+      "budget", "multisite", "autocad"
+    ],
+    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
+    positions: [
+      "technicien moyens generaux", "technicien facilities", "technicien maintenance batiment",
+      "agent maintenance", "coordinateur maintenance", "technicien cvc",
+      "technicien electromecanique", "responsable moyens generaux"
+    ]
+  },
 
-    const candidatesRes = await pool.query(`
-      SELECT id, name, email, phone
-      FROM candidate
-      WHERE status NOT IN ('ACCEPTED','REJECTED')
-    `)
+  "ingenieur de production": {
+    keywords: [
+      "lean", "six sigma", "kpi", "ordonnancement", "planification", "production",
+      "amelioration continue", "ms project", "sap pp", "sap", "mes", "oee", "trs",
+      "takt time", "kaizen", "vsm", "amdec", "5s", "smed", "tpm", "ppap",
+      "catia", "power bi", "minitab", "gestion production", "management equipe",
+      "performance", "industriel", "genie industriel", "qualite", "8d", "qrqc",
+      "airbus", "safran", "renault", "bombardier", "autoclave", "composites"
+    ],
+    levels: ["bac+5", "master", "ingenieur", "diplome ingenieur"],
+    positions: [
+      "ingenieur production", "ingenieur process", "responsable ligne",
+      "responsable production", "chef equipe", "ingenieur industrialisation",
+      "ingenieur amelioration continue", "reap"
+    ]
+  },
 
-    const skillsRes = await pool.query(`
-      SELECT candidate_id, skill_name FROM candidate_skill
-    `)
+  "technicien maintenance": {
+    keywords: [
+      "gmao", "maintenance preventive", "maintenance corrective", "hydraulique",
+      "pneumatique", "automatisme", "automate", "plc", "diagnostic", "panne",
+      "electromecaniq", "variateur", "capteur", "electricite", "mecanique",
+      "sap pm", "vibration", "lubrification", "graissage", "habilitation",
+      "iso", "lean", "5s", "tpm", "fiabilite"
+    ],
+    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
+    positions: [
+      "technicien maintenance", "technicien electromecanique",
+      "agent maintenance industrielle", "technicien automatisme",
+      "technicien instrumentation", "technicien de maintenance"
+    ]
+  },
 
-    const expRes = await pool.query(`
-      SELECT candidate_id, position FROM experience
-    `)
+  "stagiaire maintenance": {
+    keywords: [
+      "maintenance", "mecanique", "electricite", "hydraulique", "pneumatique",
+      "gmao", "diagnostic", "electromecaniq", "automatisme"
+    ],
+    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
+    positions: ["stagiaire", "stage", "technicien maintenance", "technicien"]
+  },
 
-    const eduRes = await pool.query(`
-      SELECT candidate_id, degree FROM education
-    `)
+  "coordinateur hse": {
+    keywords: [
+      "hse", "qhse", "securite", "environnement", "iso 14001", "iso 45001",
+      "audit", "risque", "duerp", "dossier", "prevention", "formation",
+      "incident", "accident", "epi", "permis feu", "plan prevention",
+      "gestion dechets", "reglementaire"
+    ],
+    levels: ["bac+5", "master", "ingenieur"],
+    positions: [
+      "coordinateur hse", "responsable hse", "ingenieur hse", "qhse",
+      "charge hse", "technicien hse"
+    ]
+  },
 
-    // =========================
-    // DEBUG
-    // =========================
-    console.log("JOBS:", jobsRes.rows.length)
-    console.log("CANDIDATES:", candidatesRes.rows.length)
-    console.log("SKILLS:", skillsRes.rows.length)
+  "hrbp": {
+    keywords: [
+      "rh", "ressources humaines", "recrutement", "formation", "gpec",
+      "sirh", "paie", "contrat", "droit social", "relations sociales",
+      "gestion talents", "onboarding", "performance", "evaluation"
+    ],
+    levels: ["bac+5", "master"],
+    positions: ["hrbp", "responsable rh", "charge rh", "drh", "hr manager", "rh generaliste"]
+  },
 
-    if (jobsRes.rows.length === 0 || candidatesRes.rows.length === 0) {
-      console.log("❌ Pas de jobs ou de candidats en base")
-      return []
+  "coordinateur pic pdp": {
+    keywords: [
+      "supply chain", "logistique", "planification", "s&op", "pic", "pdp",
+      "sap", "excel", "mrp", "approvisionnement", "stock", "flux",
+      "ordonnancement", "prevision", "demande"
+    ],
+    levels: ["bac+5", "master", "licence", "bac+3"],
+    positions: [
+      "coordinateur planification", "planificateur", "supply chain",
+      "gestionnaire production", "ordonnanceur"
+    ]
+  },
+
+  "reap responsable equipe autonome de production": {
+    keywords: [
+      "lean", "production", "management equipe", "amelioration continue",
+      "kpi", "trs", "oee", "5s", "kaizen", "smed", "tpm", "securite",
+      "qualite", "performance", "animation equipe", "aéronautique", "automobile"
+    ],
+    levels: ["bac+3", "bac+5", "master", "ingenieur", "licence"],
+    positions: [
+      "responsable equipe", "reap", "chef equipe", "team leader",
+      "responsable production", "superviseur", "responsable ligne"
+    ]
+  }
+};
+
+/* =========================
+   FIND JOB REFERENTIAL
+   Cherche le référentiel le plus proche du titre du poste.
+========================= */
+function findReferential(jobTitle) {
+  const normTitle = normalize(jobTitle);
+
+  // Correspondance exacte
+  if (JOB_REFERENTIALS[normTitle]) return JOB_REFERENTIALS[normTitle];
+
+  // Correspondance partielle : on prend la clé qui partage le plus de mots
+  let bestKey = null;
+  let bestScore = 0;
+
+  for (const key of Object.keys(JOB_REFERENTIALS)) {
+    const keyWords = key.split(" ").filter(w => w.length >= 4);
+    const hits = keyWords.filter(w => normTitle.includes(w)).length;
+    if (hits > bestScore) {
+      bestScore = hits;
+      bestKey = key;
     }
+  }
 
-    // =========================
-    // 2. BUILD MAPS
-    // =========================
-    const skillsMap = buildMap(skillsRes.rows, "candidate_id")
-    const expMap    = buildMap(expRes.rows, "candidate_id")
-    const eduMap    = buildMap(eduRes.rows, "candidate_id")
+  return bestScore >= 1 ? JOB_REFERENTIALS[bestKey] : null;
+}
 
-    // Map rapide job/candidate par id
-    const jobMap       = {}
-    const candidateMap = {}
-    jobsRes.rows.forEach(j => jobMap[j.id] = j)
-    candidatesRes.rows.forEach(c => candidateMap[c.id] = c)
+/* =========================
+   FIND MATCHING JOB
+   Correspondance souple sujet → poste
+========================= */
+function findMatchingJob(subject, jobs) {
+  if (!subject) return null;
 
-    // =========================
-    // 3. TF-IDF
-    // =========================
-    const tfidf = new TfIdf()
-    const documents = []
+  const cleanSubject = normalize(
+    subject
+      .replace(/candidature\s*(spontanee|spontanée)?/gi, "")
+      .replace(/objet\s*:/gi, "")
+      .replace(/[-_:|&]/g, " ")
+  );
 
-    // JOB DOCS
-    for (let j of jobsRes.rows) {
-      const text = normalize(j.title + " " + j.description)
-      documents.push({ type: "job", id: j.id, text })
-      tfidf.addDocument(text)
-    }
+  // 1. Titre exact dans le sujet
+  let found = jobs.find(j => cleanSubject.includes(normalize(j.title)));
+  if (found) return found;
 
-    // CANDIDATE DOCS
-    for (let c of candidatesRes.rows) {
-      const skills = (skillsMap[c.id] || []).map(s => s.skill_name).join(" ")
-      const exps   = (expMap[c.id]    || []).map(e => e.position).join(" ")
-      const edus   = (eduMap[c.id]    || []).map(e => e.degree).join(" ")
+  // 2. Tous les mots significatifs (≥4 car.) du titre dans le sujet
+  found = jobs.find(j =>
+    normalize(j.title).split(" ").filter(w => w.length >= 4).every(w => cleanSubject.includes(w))
+  );
+  if (found) return found;
 
-      const text = normalize(`${skills} ${exps} ${edus}`)
-      documents.push({ type: "candidate", id: c.id, text })
-      tfidf.addDocument(text)
-    }
+  // 3. Partiel : meilleur score (≥ 2 mots matchés)
+  const scored = jobs
+    .map(j => {
+      const words = normalize(j.title).split(" ").filter(w => w.length >= 4);
+      const hits  = words.filter(w => cleanSubject.includes(w)).length;
+      return { job: j, hits, total: words.length };
+    })
+    .filter(x => x.hits >= Math.min(2, x.total))
+    .sort((a, b) => b.hits - a.hits);
 
-    // =========================
-    // 4. COSINE SIMILARITY
-    // =========================
-    const results = []
+  return scored.length ? scored[0].job : null;
+}
 
-    const jobDocs  = documents.filter(d => d.type === "job")
-    const candDocs = documents.filter(d => d.type === "candidate")
+/* =========================
+   BUILD MAP  { key => [rows] }
+========================= */
+function buildMap(rows, key) {
+  const map = {};
+  rows.forEach(r => {
+    if (!map[r[key]]) map[r[key]] = [];
+    map[r[key]].push(r);
+  });
+  return map;
+}
 
-    for (let jIndex = 0; jIndex < jobDocs.length; jIndex++) {
-      const job = jobMap[jobDocs[jIndex].id]
+/* =========================================================
+   SCORING MULTI-DIMENSIONNEL
+   Poids : Skills 40% | Expérience 35% | Éducation 25%
 
-      for (let cIndex = 0; cIndex < candDocs.length; cIndex++) {
-        const candidate = candidateMap[candDocs[cIndex].id]
+   Pour chaque dimension on calcule un score 0→100 en
+   comparant les données du candidat contre le référentiel
+   du poste (keywords, levels, positions).
+========================================================= */
 
-        const similarity = cosineSimilarity(
-          tfidf.listTerms(jIndex),
-          tfidf.listTerms(jobDocs.length + cIndex)
-        )
+/**
+ * Score SKILLS (40%)
+ * Proportion des skills du candidat qui matchent les keywords du référentiel.
+ */
+function scoreSkills(candidateSkills, ref) {
+  if (!candidateSkills.length || !ref) return 0;
 
-        // ── Éléments matchés : termes communs entre job et candidat ──
-        const jobTerms  = new Set(tfidf.listTerms(jIndex).map(t => t.term))
-        const candTerms = tfidf.listTerms(jobDocs.length + cIndex).map(t => t.term)
-        const matched   = candTerms
-          .filter(t => jobTerms.has(t))
-          .slice(0, 6) // max 6 tags affichés
+  const matched = candidateSkills.filter(skill => {
+    const normSkill = normalize(skill);
+    return ref.keywords.some(kw => normSkill.includes(kw) || kw.includes(normSkill));
+  });
 
-        results.push({
-          jobId:          job.id,
-          jobTitle:       job.title,
-          candidateId:    candidate.id,
-          candidateName:  candidate.name,
-          candidateEmail: candidate.email  || '',
-          candidatePhone: candidate.phone  || '',
-          score:          Number(similarity.toFixed(3)),
-          matchedItems:   matched
-        })
+  return Math.round((matched.length / candidateSkills.length) * 100);
+}
+
+/**
+ * Score EXPÉRIENCE (35%)
+ * Vérifie si les intitulés de postes du candidat correspondent
+ * aux positions attendues pour ce référentiel.
+ */
+function scoreExperience(candidateExp, ref) {
+  if (!candidateExp.length || !ref) return 0;
+
+  const matched = candidateExp.filter(pos => {
+    const normPos = normalize(pos);
+    return ref.positions.some(rp => {
+      const normRp = normalize(rp);
+      // Correspondance souple : partage d'au moins 1 mot-clé significatif (≥5 car.)
+      const rpWords = normRp.split(" ").filter(w => w.length >= 5);
+      return rpWords.some(w => normPos.includes(w)) || normPos.includes(normRp);
+    });
+  });
+
+  // Score basé sur la proportion de postes matchés (plafonné à 100)
+  return Math.min(100, Math.round((matched.length / candidateExp.length) * 100));
+}
+
+/**
+ * Score ÉDUCATION (25%)
+ * Vérifie si le niveau d'études du candidat correspond
+ * au niveau attendu par le poste.
+ */
+function scoreEducation(candidateEdu, ref) {
+  if (!candidateEdu.length || !ref) return 0;
+
+  // Mapping niveau → valeur numérique
+  const LEVEL_VALUES = {
+    "bac":      1,
+    "bts":      2, "dut": 2, "bac+2": 2,
+    "licence":  3, "bac+3": 3,
+    "master":   5, "bac+5": 5,
+    "ingenieur": 5, "diplome ingenieur": 5,
+    "doctorat": 6
+  };
+
+  // Niveau minimum requis par le poste
+  const requiredLevels = ref.levels.map(l => LEVEL_VALUES[normalize(l)] || 0);
+  const minRequired    = requiredLevels.length ? Math.min(...requiredLevels) : 0;
+
+  // Niveau maximum du candidat
+  let candidateMax = 0;
+  for (const deg of candidateEdu) {
+    const normDeg = normalize(deg);
+    for (const [key, val] of Object.entries(LEVEL_VALUES)) {
+      if (normDeg.includes(key) && val > candidateMax) {
+        candidateMax = val;
       }
     }
+  }
 
-    // =========================
-    // 5. TRI + CALCUL maxScore
-    // =========================
-    const sorted = results.sort((a, b) => b.score - a.score)
+  if (candidateMax === 0) return 0;
 
-    const maxScore = sorted.length > 0 ? sorted[0].score : 0
+  // Score
+  if (candidateMax >= minRequired) return 100;
+  if (candidateMax === minRequired - 1) return 60; // légèrement sous le niveau requis
+  return 30; // très en dessous
+}
 
-    // On normalise le score en pourcentage lisible (0–100)
-    return sorted.map(r => ({
-      ...r,
-      scorePercent: maxScore > 0 ? Math.round((r.score / maxScore) * 100) : 0
-    }))
+/* =========================
+   MATCH CANDIDATES
+========================= */
+exports.matchCandidates = async () => {
+  try {
+    const jobsRes = await pool.query(`
+      SELECT id, title, COALESCE(description, '') AS description FROM job
+    `);
+
+    const candidatesRes = await pool.query(`
+      SELECT
+        c.id,
+        c.name,
+        c.email,
+        c.phone,
+        e.subject
+      FROM candidate c
+      LEFT JOIN application a ON a.candidate_id = c.id
+      LEFT JOIN email       e ON e.id = a.email_id
+      WHERE c.status NOT IN ('ACCEPTED', 'REJECTED')
+    `);
+
+    const skillsRes = await pool.query(`SELECT candidate_id, skill_name FROM candidate_skill`);
+    const expRes    = await pool.query(`SELECT candidate_id, position     FROM experience`);
+    const eduRes    = await pool.query(`SELECT candidate_id, degree       FROM education`);
+
+    const skillsMap = buildMap(skillsRes.rows, "candidate_id");
+    const expMap    = buildMap(expRes.rows,    "candidate_id");
+    const eduMap    = buildMap(eduRes.rows,    "candidate_id");
+
+    const results = [];
+
+    for (const candidate of candidatesRes.rows) {
+      const targetJob = findMatchingJob(candidate.subject, jobsRes.rows);
+      if (!targetJob) continue;
+
+      const ref = findReferential(targetJob.title);
+
+      const candidateSkills = (skillsMap[candidate.id] || []).map(s => s.skill_name).filter(Boolean);
+      const candidateExp    = (expMap[candidate.id]    || []).map(e => e.position).filter(Boolean);
+      const candidateEdu    = (eduMap[candidate.id]    || []).map(e => e.degree).filter(Boolean);
+
+      // ── Scores par dimension ─────────────────────────────────────────
+      const sSkills  = scoreSkills(candidateSkills, ref);     // /100
+      const sExp     = scoreExperience(candidateExp, ref);    // /100
+      const sEdu     = scoreEducation(candidateEdu, ref);     // /100
+
+      // ── Score global pondéré ─────────────────────────────────────────
+      const score = Math.round(
+        sSkills * 0.40 +
+        sExp    * 0.35 +
+        sEdu    * 0.25
+      );
+
+      // ── Items matchés pour l'affichage ───────────────────────────────
+      const matchedSkills = ref
+        ? candidateSkills.filter(skill => {
+            const ns = normalize(skill);
+            return ref.keywords.some(kw => ns.includes(kw) || kw.includes(ns));
+          })
+        : [];
+
+      results.push({
+        jobId:          targetJob.id,
+        jobTitle:       targetJob.title,
+        candidateId:    candidate.id,
+        candidateName:  candidate.name,
+        candidateEmail: candidate.email,
+        candidatePhone: candidate.phone,
+        score,
+        scoreDetail: {
+          skills:     sSkills,
+          experience: sExp,
+          education:  sEdu
+        },
+        matchedItems: [...new Set(matchedSkills)].slice(0, 8)
+      });
+    }
+
+    return results.sort((a, b) => b.score - a.score);
 
   } catch (err) {
-    console.error("❌ MATCH ERROR:", err)
-    throw err
+    console.error("MATCH ERROR:", err);
+    throw err;
   }
-}
-
-// =========================
-// COSINE
-// =========================
-function cosineSimilarity(vecA, vecB) {
-  const mapA = {}
-  const mapB = {}
-
-  vecA.forEach(t => mapA[t.term] = t.tfidf)
-  vecB.forEach(t => mapB[t.term] = t.tfidf)
-
-  const allTerms = new Set([...Object.keys(mapA), ...Object.keys(mapB)])
-
-  let dot = 0, magA = 0, magB = 0
-
-  for (let term of allTerms) {
-    const a = mapA[term] || 0
-    const b = mapB[term] || 0
-    dot  += a * b
-    magA += a * a
-    magB += b * b
-  }
-
-  if (magA === 0 || magB === 0) return 0
-
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB))
-}
-
-// =========================
-// HELPERS
-// =========================
-function buildMap(rows, key) {
-  const map = {}
-  rows.forEach(r => {
-    if (!map[r[key]]) map[r[key]] = []
-    map[r[key]].push(r)
-  })
-  return map
-}
-
-function normalize(str) {
-  if (!str) return ""
-  return str
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-}
+};

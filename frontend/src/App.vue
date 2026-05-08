@@ -4,11 +4,12 @@
     <!-- SIDEBAR -->
     <aside class="sidebar">
       <div class="sidebar-logo">
-        🏢 RH Manager
+        RH Manager
       </div>
 
       <nav class="sidebar-nav">
         <ul>
+
           <li
             :class="{ active: currentPage === 'dashboard' }"
             @click="currentPage = 'dashboard'"
@@ -45,11 +46,19 @@
           </li>
 
           <li
+            :class="{ active: currentPage === 'recommendations' }"
+            @click="currentPage = 'recommendations'"
+          >
+            Recommendations
+          </li>
+
+          <li
             :class="{ active: currentPage === 'jobs' }"
             @click="currentPage = 'jobs'"
           >
             Jobs
           </li>
+
         </ul>
       </nav>
     </aside>
@@ -67,6 +76,8 @@
 
       <Refuses v-if="currentPage === 'refuses'" />
 
+      <Recommendations v-if="currentPage === 'recommendations'" />
+
       <Jobs v-if="currentPage === 'jobs'" />
 
     </main>
@@ -80,6 +91,7 @@ import Candidates from './components/Candidates.vue'
 import Matching from './components/Matching.vue'
 import Admis from './components/Admis.vue'
 import Refuses from './components/Refuses.vue'
+import Recommendations from './components/Recommendations.vue'
 import Jobs from './components/Jobs.vue'
 
 export default {
@@ -91,6 +103,7 @@ export default {
     Matching,
     Admis,
     Refuses,
+    Recommendations,
     Jobs
   },
 
@@ -135,6 +148,7 @@ body {
   font-size: 20px;
   font-weight: bold;
   border-bottom: 1px solid #374151;
+  color: #ffffff;
 }
 
 .sidebar-nav ul {

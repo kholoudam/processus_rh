@@ -1,8 +1,7 @@
-const express = require("express")
-const router = express.Router()
+const express = require("express");
+const router = express.Router();
+const matchingController = require("../controllers/matching.controller");
 
-const matchingController = require("../controllers/matching.controller")
+router.get("/", matchingController.getMatching);
 
-router.get("/", matchingController.getAllMatches)
-
-module.exports = router
+module.exports = router;

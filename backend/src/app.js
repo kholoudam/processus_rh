@@ -49,7 +49,7 @@ try {
 }
 
 try {
-  app.use("/api/match", require("./routes/matching.routes"));
+  app.use("/api/matching", require("./routes/matching.routes"));
 } catch (err) {
   console.log("⚠ matching.routes absent");
 }

@@ -1,288 +1,343 @@
-const fs      = require('fs');
-const pdf     = require('pdf-parse');
-const mammoth = require('mammoth');
-const path    = require('path');
+const pdfParse = require("pdf-parse");
 
-// =========================
-// EXTRACTION TEXTE
-// =========================
-async function extractText(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  try {
-    if (ext === '.pdf') {
-      const buffer = fs.readFileSync(filePath);
-      const data   = await pdf(buffer);
-      if (data.text && data.text.trim().length > 30) return data.text;
-      console.warn('PDF peu lisible.');
-      return data.text || '';
+/* =========================
+   NORMALIZE
+   Remplace (cid:XXX) → bullet visible, nettoie whitespace
+========================= */
+function normalize(text) {
+  return text
+    .replace(/\r/g, "")
+    .replace(/\t/g, " ")
+    // (cid:127) et tous les (cid:*) utilisés comme bullets → •
+    .replace(/\(cid:\d+\)/g, "•")
+    .replace(/[ ]+/g, " ")
+    .trim();
+}
+
+/* =========================
+   DETECTION PDF ILLISIBLE
+========================= */
+function isCorruptedText(text) {
+  if (!text || text.length < 80) return true;
+  const pdfTokens = (text.match(/\b(obj|endobj|stream|endstream|xref|trailer|startxref)\b/g) || []).length;
+  if (pdfTokens >= 3) return true;
+  return false;
+}
+
+/* =========================
+   EXTRACT SECTION
+========================= */
+function getSection(text, startVariants, endVariants = []) {
+  let startIndex = -1;
+  let matchedStart = "";
+
+  for (const variant of startVariants) {
+    const idx = text.indexOf(variant);
+    if (idx !== -1 && (startIndex === -1 || idx < startIndex)) {
+      startIndex = idx;
+      matchedStart = variant;
     }
-    if (ext === '.docx' || ext === '.doc') {
-      const result = await mammoth.extractRawText({ path: filePath });
-      return result.value || '';
-    }
-    return fs.readFileSync(filePath, 'utf8');
-  } catch (err) {
-    console.warn('extractText error:', err.message);
-    return '';
   }
+
+  if (startIndex === -1) return "";
+
+  let endIndex = text.length;
+  for (const marker of endVariants) {
+    const idx = text.indexOf(marker, startIndex + matchedStart.length);
+    if (idx !== -1 && idx < endIndex) endIndex = idx;
+  }
+
+  return text.substring(startIndex + matchedStart.length, endIndex).trim();
 }
 
-function clean(text) {
-  return (text || '')
-    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-    .replace(/\t/g, ' ').replace(/ {2,}/g, ' ').trim();
-}
-
-// =========================
-// EMAIL
-// =========================
+/* =========================
+   EXTRACT EMAIL
+========================= */
 function extractEmail(text) {
-  const m = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-  return m ? m[0].toLowerCase() : '';
+  const match = text.match(/[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}/i);
+  return match ? match[0].trim() : null;
 }
 
-// =========================
-// TELEPHONE
-// =========================
+/* =========================
+   EXTRACT PHONE
+   Marocain (+212, 06/07) + Français (+33, 0X XX XX XX XX)
+========================= */
 function extractPhone(text) {
-  const patterns = [
-    /(?:\+212|00212)\s?[5-7]\d{8}/,
-    /0[5-7]\d{8}/,
-    /\+\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{2,4}[\s.\-]?\d{2,4}[\s.\-]?\d{2,4}/,
-  ];
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return m[0].replace(/[\s.\-]/g, '').trim();
-  }
-  return '';
+  const moroccan = text.match(/(\+212|00212|0212)[.\-\s]?[5-7][.\-\s]?\d{2}[.\-\s]?\d{2}[.\-\s]?\d{2}[.\-\s]?\d{2}/);
+  if (moroccan) return moroccan[0].replace(/[.\-\s]/g, "").trim();
+
+  const local = text.match(/0[5-7][.\-\s]?\d{2}[.\-\s]?\d{2}[.\-\s]?\d{2}[.\-\s]?\d{2}/);
+  if (local) return local[0].replace(/[.\-\s]/g, "").trim();
+
+  // Français : +33 X XX XX XX XX  ou  0X XX XX XX XX
+  const french = text.match(/(\+33\s?|0)[1-9](?:[\s.\-]?\d{2}){4}/);
+  if (french && french[0].replace(/\D/g, "").length >= 9) return french[0].trim();
+
+  // Labellisé
+  const labeled = text.match(/(?:t[eé]l[eé]?phone?|mobile|gsm)\s*[:\-]?\s*([\+\d][.\-\s\d]{7,20})/i);
+  if (labeled && labeled[1].replace(/\D/g, "").length >= 8) return labeled[1].trim();
+
+  return null;
 }
 
-// =========================
-// NOM — 5 strategies
-// =========================
-function extractName(cvText, emailBody, senderEmail) {
-  const allText = cvText + '\n' + emailBody;
-
-  // 1. "je m'appelle / I am / my name is"
-  const s1 = allText.match(/(?:je m['']?appelle|je suis|I am|my name is)\s+([A-ZÀ-Ÿa-zà-ÿ]+(?:\s+[A-ZÀ-Ÿa-zà-ÿ]+){1,3})/i);
-  if (s1) return s1[1].trim();
-
-  // 2. "Nom : / Prénom :" dans le CV
-  const s2 = cvText.match(/(?:^|\n)\s*(?:nom|name|prénom|full name)\s*[:\-]\s*([A-ZÀ-Ÿa-zà-ÿ][^\n]{2,40})/im);
-  if (s2) return s2[1].trim();
-
-  // 3. Première ligne MAJUSCULE (pattern CV classique)
-  const lines = cvText.split('\n').map(l => l.trim()).filter(Boolean);
-  for (const line of lines.slice(0, 8)) {
-    if (line === line.toUpperCase() && line.length > 4 && line.length < 50 && /^[A-ZÀ-Ÿ\s\-']+$/.test(line)) {
-      return line.split(' ').map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ');
-    }
-  }
-
-  // 4. Première ligne avec 2-4 mots en lettres seulement
-  for (const line of lines.slice(0, 12)) {
-    if (/cv|curriculum|vitae|profil|contact|objet|@|\d{4}/i.test(line)) continue;
-    const words = line.split(/\s+/).filter(w => /^[A-ZÀ-Ÿa-zà-ÿ\-']{2,}$/.test(w));
-    if (words.length >= 2 && words.length <= 4) {
-      return words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-    }
-  }
-
-  // 5. Fallback : partie locale email sender
-  if (senderEmail) {
-    const local = senderEmail.split('@')[0].replace(/[._\-\d]+/g, ' ').trim();
-    if (local.length > 2) {
-      return local.split(' ').filter(w => w.length > 1)
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-    }
-  }
-  return 'Non défini';
-}
-
-// =========================
-// ADRESSE
-// =========================
+/* =========================
+   EXTRACT ADDRESS
+   Retourne la ligne d'adresse propre, pas le header complet.
+========================= */
 function extractAddress(text) {
-  const villes = [
-    'Casablanca','Rabat','Fès','Marrakech','Tanger','Agadir','Meknès','Oujda',
-    'Kenitra','Tétouan','Safi','El Jadida','Nador','Settat','Berrechid',
-    'Mohammedia','Larache','Khouribga','Beni Mellal','Errachidia',
-    'Dakhla','Laâyoune','Taroudant','Ouarzazate','Ifrane','Salé',
-  ];
-  for (const v of villes) {
-    if (new RegExp(v, 'i').test(text)) return v;
-  }
-  const m = text.match(/(?:adresse|ville|city|address)\s*[:\-]?\s*([^\n]{3,50})/i);
-  return m ? m[1].trim() : 'Maroc';
-}
+  // "Ville, Maroc" explicite
+  const cityCountry = text.match(
+    /\b(Casablanca|Rabat|Fès|Fes|Tanger|Agadir|Marrakech|Kénitra|Kenitra|Meknès|Meknes|Salé|Sale|Mohammedia|Settat|Oujda|Laâyoune|Témara|Temara)\s*,\s*Maroc\b/i
+  );
+  if (cityCountry) return cityCountry[0].trim();
 
-// =========================
-// DIPLOME
-// =========================
-function extractDegree(text) {
-  const patterns = [
-    /(?:master|mastère|m2)\s+[^\n]{0,80}/i,
-    /(?:licence|bachelor|l3)\s+[^\n]{0,80}/i,
-    /(?:ingénieur|engineer)\s+[^\n]{0,80}/i,
-    /(?:doctorat|ph\.?d)\s+[^\n]{0,80}/i,
-    /(?:bts|dut|bac\s*\+\s*\d)\s+[^\n]{0,80}/i,
-    /(?:technicien spécialisé|technicien)\s+[^\n]{0,80}/i,
-    /(?:diplôme|diploma)\s+[^\n]{0,80}/i,
-  ];
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return m[0].trim().slice(0, 120);
-  }
-  return '';
-}
-
-// =========================
-// COMPETENCES
-// =========================
-function extractSkills(text) {
-  const lower  = text.toLowerCase();
-  const found  = new Set();
-
-  const keywords = [
-    'python','java','javascript','typescript','c++','c#','php','ruby','go','rust',
-    'swift','kotlin','scala','r','matlab','vba','bash','shell',
-    'react','vue','angular','nodejs','node.js','express','nextjs','nuxt',
-    'django','flask','fastapi','spring','laravel','symfony','asp.net',
-    'html','css','sass','scss','bootstrap','tailwind','jquery','graphql','rest api',
-    'sql','postgresql','mysql','mongodb','redis','elasticsearch','oracle','sqlite',
-    'power bi','tableau','qlik','sap','excel',
-    'pandas','numpy','scikit-learn','tensorflow','pytorch','keras',
-    'machine learning','deep learning','nlp','computer vision','data science',
-    'big data','hadoop','spark','airflow','etl',
-    'docker','kubernetes','aws','azure','gcp','terraform','ansible','jenkins',
-    'git','github','gitlab','ci/cd','linux','unix','nginx',
-    'jira','confluence','trello','figma','autocad','solidworks',
-    'agile','scrum','kanban','merise','uml',
-    'français','anglais','arabe','espagnol','allemand','italien',
-    'lean','six sigma','5s','qualité','iso','hse','sécurité',
-    'production','maintenance','supply chain','logistique','méthodes',
-    'rh','ressources humaines','recrutement','paie','formation',
-    'gestion de projet','management','leadership','communication',
-  ];
-
-  for (const kw of keywords) {
-    if (lower.includes(kw)) found.add(kw);
-  }
-
-  // Section libre compétences
-  const sec = text.match(/(?:compétences?|skills?|savoir[- ]faire|technologies?|outils?)\s*[:\-]?\n([\s\S]{0,800}?)(?:\n\n|\n[A-ZÀÂ])/i);
-  if (sec) {
-    sec[1].split(/[\n,•\-\|\/◆▪◦]/)
-      .map(s => s.replace(/[:\*\[\]()\d]/g, '').trim())
-      .filter(s => s.length > 2 && s.length < 50)
-      .forEach(s => found.add(s.toLowerCase()));
-  }
-
-  return [...found].filter(Boolean).slice(0, 40);
-}
-
-// =========================
-// EXPERIENCES → { position, company, duration }
-// =========================
-function extractExperience(text) {
-  const results = [];
-
-  const sec = text.match(/(?:expérience|experience|parcours professionnel|emplois?)\s*[:\-]?\n([\s\S]{0,2000}?)(?:\n(?:formation|éducation|compétences?|skills?|langues|projets?|références?|centres?)\s*[:\-]?\n|$)/i);
-  const section = sec ? sec[1] : text.slice(0, 2000);
-
-  const lines = section.split('\n').map(l => l.trim()).filter(Boolean);
-  let current = null;
-
+  const lines = text.split("\n");
   for (const line of lines) {
-    const yearRange  = line.match(/\b(20\d{2}|19\d{2})\s*[-–—]\s*(20\d{2}|19\d{2}|présent|aujourd['']?hui|now|actuel)/i);
-    const isPosition = /(?:ingénieur|développeur|dev |manager|chef|responsable|technicien|coordinateur|analyste|consultant|stagiaire|intern|directeur|assistant|chargé|agent)/i.test(line);
+    const t = line.trim();
+    if (!t || t.includes("|") || t.includes("@") || t.toLowerCase().includes("linkedin")) continue;
+    // Ligne "Adresse : ..." → on prend la valeur
+    const addrLabel = t.match(/^adresse\s*:\s*(.+)/i);
+    if (addrLabel) return addrLabel[1].trim();
+    // Numéro + rue
+    if (/^\d+[\s,].{5,}/.test(t) && t.length < 100) return t;
+    // Rue / avenue / chemin / boulevard
+    if (/\b(rue|avenue|av\.|boulevard|bd\.|chemin|allée|allee|impasse|place)\b/i.test(t) && t.length < 100) return t;
+    // Ville marocaine seule
+    if (
+      t.length < 60 &&
+      /(Casablanca|Rabat|Fès|Fes|Tanger|Agadir|Marrakech|Kénitra|Kenitra|Meknès|Meknes|Salé|Sale|Mohammedia|Settat|Oujda)/i.test(t)
+    ) return t;
+  }
+  return null;
+}
 
-    if (yearRange || isPosition) {
-      if (current && (current.position || current.company)) results.push(current);
-      current = {
-        position: line.replace(/\b(20\d{2}|19\d{2})\s*[-–—]\s*(20\d{2}|19\d{2}|présent|aujourd['']?hui|now|actuel)\b/gi, '').replace(/[|•◆▪]/g, '').trim(),
-        company:  '',
-        duration: yearRange ? yearRange[0] : '',
-      };
-    } else if (current) {
-      if (!current.company && line.length > 2 && line.length < 100) {
-        current.company = line.replace(/[|•◆▪]/g, '').trim();
+/* =========================
+   EXTRACT NAME
+========================= */
+function extractName(lines) {
+  for (const line of lines.slice(0, 8)) {
+    if (!line || line.includes("|") || line.includes("@") || line.toLowerCase().includes("linkedin")) continue;
+    if (line.length > 60) continue;
+    // "Saad EL AMRANI" ou "Omar BENHADDOU"
+    if (/^[A-ZÀ-Ÿa-zà-ÿ\-]+(\s[A-ZÀ-Ÿa-zà-ÿ\-]+)*\s[A-ZÀ-Ÿ]{2,}(\s[A-ZÀ-Ÿ]{2,})?$/.test(line)) return line.trim();
+    // "Capucine Launay" — prénom + nom classique
+    if (/^[A-ZÀ-Ÿ][a-zà-ÿ\-]+(\s[A-ZÀ-Ÿ][a-zà-ÿ\-]+)+$/.test(line)) return line.trim();
+    // "Arthur du Alves" — avec particule
+    if (/^[A-ZÀ-Ÿ][a-zà-ÿ\-]+(\s(du|de|le|la|van|von|el|al)\s)?[A-ZÀ-Ÿ][a-zà-ÿ\-]+$/i.test(line)) return line.trim();
+    // NOM Prénom
+    if (/^[A-ZÀ-Ÿ]{2,}(\s[A-ZÀ-Ÿ]{2,})*\s[A-ZÀ-Ÿ][a-zà-ÿ\-]+/.test(line)) return line.trim();
+  }
+  return null;
+}
+
+/* =========================
+   PARSE EDUCATION
+   Format Colab : "Diplôme Année\nÉcole"  (année collée au diplôme)
+   Format alternatif : "Diplôme\nÉcole\nAnnée"
+========================= */
+function parseEducation(section) {
+  if (!section) return [];
+
+  const lines = section.split("\n").map(l => l.trim()).filter(Boolean);
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Format A : "Master Génie Industriel 2022"  (diplôme + année sur même ligne)
+    const withYear = line.match(/^(.+?)\s+((?:19|20)\d{2})$/);
+    if (withYear) {
+      const degreeText = withYear[1].trim();
+      const year       = parseInt(withYear[2]);
+      if (/master|licence|bachelor|ingénieur|ingenieur|doctorat|bts|dut|bac\b|dipl[oô]me/i.test(degreeText)) {
+        const nextLine = lines[i + 1] || "";
+        const school   = nextLine && !/^((?:19|20)\d{2})$/.test(nextLine) ? nextLine : null;
+        result.push({ degree: degreeText, school, year });
+        i += school ? 2 : 1;
+        continue;
       }
     }
-  }
-  if (current && (current.position || current.company)) results.push(current);
 
-  // Fallback lignes "stage"
-  if (!results.length) {
-    const stages = text.match(/(?:stage|mission|cdd|cdi)[^\n]{5,100}/gi) || [];
-    stages.forEach(s => results.push({ position: s.trim(), company: '', duration: '' }));
-  }
-
-  return results.slice(0, 10);
-}
-
-// =========================
-// FORMATIONS → { degree, institution, year }
-// =========================
-function extractEducation(text) {
-  const results = [];
-
-  const sec = text.match(/(?:formation|éducation|education|études|diplômes?|parcours scolaire)\s*[:\-]?\n([\s\S]{0,1500}?)(?:\n(?:expérience|compétences?|skills?|langues|projets?|références?|centres?)\s*[:\-]?\n|$)/i);
-  if (!sec) return results;
-
-  const lines = sec[1].split('\n').map(l => l.trim()).filter(Boolean);
-  let current = null;
-
-  for (const line of lines) {
-    const yearMatch = line.match(/\b(20\d{2}|19\d{2})\b/);
-    const isDiploma = /(?:master|mastère|licence|bachelor|ingénieur|bts|dut|bac|doctorat|phd|diplôme|technicien)/i.test(line);
-
-    if (isDiploma) {
-      if (current) results.push(current);
-      current = {
-        degree:      line.replace(/\b(20\d{2}|19\d{2})\b/g, '').replace(/[|•◆▪]/g, '').trim(),
-        institution: '',
-        year:        yearMatch ? parseInt(yearMatch[0]) : null,
-      };
-    } else if (current) {
-      if (!current.institution && line.length > 3 && line.length < 120) {
-        current.institution = line.replace(/[|•◆▪]/g, '').trim();
-      }
-      if (!current.year && yearMatch) current.year = parseInt(yearMatch[0]);
+    // Format B : "Diplôme\nÉcole\n2022"
+    if (/master|licence|bachelor|ingénieur|ingenieur|doctorat|bts|dut|bac\b|dipl[oô]me/i.test(line)) {
+      const school   = (lines[i + 1] && !/^\d{4}$/.test(lines[i + 1])) ? lines[i + 1] : null;
+      const yearLine = school ? lines[i + 2] : lines[i + 1];
+      const year     = yearLine?.match(/\b(19|20)\d{2}\b/) ? parseInt(yearLine.match(/\b(19|20)\d{2}\b/)[0]) : null;
+      result.push({ degree: line, school, year });
+      i += (school ? 1 : 0) + (year ? 1 : 0) + 1;
+      continue;
     }
-  }
-  if (current) results.push(current);
 
-  return results.slice(0, 8);
+    i++;
+  }
+
+  return result;
 }
 
-// =========================
-// EXPORT PRINCIPAL
-// =========================
-exports.parseCV = async (filePath, emailBody = '') => {
-  try {
-    const cvText  = await extractText(filePath);
-    const full    = clean(cvText + '\n' + emailBody);
-    const emailEx = extractEmail(full);
-    const name    = extractName(cvText, emailBody, emailEx);
-    const parts   = name.trim().split(/\s+/);
+/* =========================
+   PARSE EXPERIENCE
+   Format Colab : "Ingénieur Production 2019-2022\nAlstom Maroc"
+   Format alternatif bullet / lignes séparées
+========================= */
+function parseExperience(section) {
+  if (!section) return [];
 
-    return {
-      first_name: parts[0]                 || '',
-      last_name:  parts.slice(1).join(' ') || '',
-      phone:      extractPhone(full),
-      email:      emailEx,
-      address:    extractAddress(full),
-      degree:     extractDegree(full),
-      skills:     extractSkills(full),
-      experience: extractExperience(cvText),
-      education:  extractEducation(cvText),
-    };
-  } catch (err) {
-    console.error('parseCV error:', err.message);
-    return {
-      first_name: 'Non défini', last_name: '', phone: '', email: '',
-      address: 'Maroc', degree: '', skills: [], experience: [], education: [],
-    };
+  const lines = section.split("\n").map(l => l.trim()).filter(Boolean);
+  const result = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Format A : "Titre 2019-2022"  (titre + durée sur même ligne)
+    const titleDuration = line.match(/^(.+?)\s+((?:19|20)\d{2}\s*[-–]\s*(?:(?:19|20)\d{2}|[Pp]r[eé]sent|[Aa]ctuel|aujourd))$/);
+    if (titleDuration) {
+      const company = lines[i + 1] && !/^((?:19|20)\d{2})/.test(lines[i + 1]) ? lines[i + 1] : null;
+      result.push({
+        position: titleDuration[1].trim(),
+        duration: titleDuration[2].trim(),
+        company:  company || null
+      });
+      i += company ? 2 : 1;
+      continue;
+    }
+
+    // Format B : "Titre • Entreprise • 2020–2023"
+    if (line.includes("•") && /\d{4}/.test(line)) {
+      const parts = line.split("•").map(p => p.trim()).filter(Boolean);
+      const duration = parts.find(p => /\d{4}/.test(p)) || null;
+      result.push({
+        position: parts[0],
+        company:  parts.find((p, idx) => idx > 0 && !/\d{4}/.test(p)) || null,
+        duration
+      });
+      i++;
+      continue;
+    }
+
+    // Format C : "Titre\nEntreprise\n2020-2023"
+    if (/ingénieur|ingenieur|technicien|responsable|préparateur|preparateur|agent|manager|assistant|analyste|process|coordinateur/i.test(line)) {
+      const nextLine  = lines[i + 1] || "";
+      const thirdLine = lines[i + 2] || "";
+      const dur = thirdLine.match(/((?:19|20)\d{2}\s*[-–]\s*(?:(?:19|20)\d{2}|[Pp]r[eé]sent|[Aa]ctuel))/);
+      result.push({
+        position: line,
+        company:  nextLine || null,
+        duration: dur ? dur[0] : null
+      });
+      i += dur ? 3 : 2;
+      continue;
+    }
+
+    i++;
   }
-};
+
+  return result;
+}
+
+/* =========================
+   PARSE BULLETS
+   Gère :
+     • "(cid:127) Valeur"  → déjà converti en "• Valeur" par normalize()
+     • "• Valeur"
+     • "Catégorie : val1 • val2"
+========================= */
+function parseBullets(section) {
+  if (!section) return [];
+
+  const expanded = [];
+  const rawLines = section.split("\n").map(l => l.trim()).filter(Boolean);
+
+  for (const line of rawLines) {
+    // Skip titres de section résiduels
+    if (/^(COMPÉTENCES|COMPETENCES|SOFT SKILLS|LANGUES|CERTIFICATIONS|EXPÉRIENCE|EXPERIENCE|FORMATION|EDUCATION)/i.test(line)) continue;
+
+    // "Catégorie : val1 • val2 • val3"
+    if (line.includes(":") && !line.startsWith("•")) {
+      const colonIdx   = line.indexOf(":");
+      const afterColon = line.substring(colonIdx + 1).trim();
+      if (afterColon.length > 0) {
+        const subItems = afterColon
+          .split(/[•,]/)
+          .map(v => v.trim())
+          .filter(v => v.length > 1 && v.length < 80);
+        if (subItems.length >= 1) {
+          subItems.forEach(v => expanded.push(v));
+          continue;
+        }
+      }
+    }
+
+    // Ligne avec plusieurs "•" : "• val1 • val2"
+    if ((line.match(/•/g) || []).length > 1) {
+      line.split("•").map(v => v.trim()).filter(v => v.length > 1 && v.length < 80)
+        .forEach(v => expanded.push(v));
+      continue;
+    }
+
+    // Bullet simple "• Valeur" ou "- Valeur"
+    const clean = line.replace(/^[•\-–*]\s*/, "").trim();
+    if (clean.length > 1 && clean.length < 80) expanded.push(clean);
+  }
+
+  return [...new Set(expanded)].filter(s => s.length > 1);
+}
+
+/* =========================
+   PARSE CV  — export principal
+========================= */
+async function parseCV(buffer) {
+  const data = await pdfParse(buffer);
+  const raw  = normalize(data.text);
+
+  if (isCorruptedText(raw)) {
+    throw new Error("PDF non lisible (scanné ou corrompu) — extraction impossible");
+  }
+
+  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+
+  const SEC_FORMATION  = ["FORMATION", "FORMATIONS", "ÉDUCATION", "EDUCATION", "DIPLÔMES", "DIPLOMES", "PARCOURS ACADÉMIQUE", "PARCOURS ACADEMIQUE"];
+  const SEC_EXPERIENCE = [
+    "EXPÉRIENCES PROFESSIONNELLES", "EXPERIENCES PROFESSIONNELLES",
+    "EXPÉRIENCE PROFESSIONNELLE",   "EXPERIENCE PROFESSIONNELLE",
+    "EXPÉRIENCES",                  "EXPERIENCES",
+    "EXPÉRIENCE",                   "EXPERIENCE",
+    "PARCOURS PROFESSIONNEL"
+  ];
+  const SEC_SKILLS = [
+    "COMPÉTENCES TECHNIQUES", "COMPETENCES TECHNIQUES",
+    "COMPÉTENCES",            "COMPETENCES",
+    "HARD SKILLS",            "OUTILS & TECHNOLOGIES"
+  ];
+  const SEC_SOFT  = ["SOFT SKILLS", "COMPÉTENCES COMPORTEMENTALES", "COMPETENCES COMPORTEMENTALES", "QUALITÉS", "QUALITES"];
+  const SEC_CERTS = ["CERTIFICATIONS", "CERTIFICATS", "HABILITATIONS", "CERTIFICATIONS & HABILITATIONS"];
+  const SEC_LANG  = ["LANGUES"];
+  const ALL_SEC   = [
+    ...SEC_FORMATION, ...SEC_EXPERIENCE, ...SEC_SKILLS,
+    ...SEC_SOFT, ...SEC_CERTS, ...SEC_LANG,
+    "CENTRES D'INTÉRÊT", "LOISIRS", "RÉFÉRENCES", "REFERENCES",
+    "INFORMATIONS PERSONNELLES", "CONTACT"
+  ];
+
+  const formation  = getSection(raw, SEC_FORMATION,  [...SEC_EXPERIENCE, ...ALL_SEC]);
+  const experience = getSection(raw, SEC_EXPERIENCE, [...SEC_SKILLS,     ...ALL_SEC]);
+  const skills     = getSection(raw, SEC_SKILLS,     [...SEC_SOFT,       ...ALL_SEC]);
+  const soft       = getSection(raw, SEC_SOFT,       [...SEC_CERTS,      ...ALL_SEC]);
+  const certs      = getSection(raw, SEC_CERTS,      ALL_SEC);
+
+  return {
+    name:           extractName(lines),
+    email:          extractEmail(raw),
+    phone:          extractPhone(raw),
+    address:        extractAddress(raw),
+    education:      parseEducation(formation),
+    experience:     parseExperience(experience),
+    skills:         parseBullets(skills),
+    softSkills:     parseBullets(soft),
+    certifications: parseBullets(certs),
+    rawText:        raw
+  };
+}
+
+module.exports = { parseCV };

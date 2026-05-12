@@ -4,6 +4,10 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const cron = require("node-cron");
+const { exec } = require("child_process");
+
+const linkedinRoutes = require("./routes/linkedinRoutes");
 
 const app = express();
 
@@ -25,7 +29,7 @@ if (!fs.existsSync(uploadsPath)) {
 
 app.use("/uploads", express.static(uploadsPath));
 
-console.log("📁 Uploads:", uploadsPath);
+console.log("Uploads:", uploadsPath);
 
 /* ===============================
    ROUTES API
@@ -33,32 +37,35 @@ console.log("📁 Uploads:", uploadsPath);
 try {
   app.use("/api/emails", require("./routes/email.routes"));
 } catch (err) {
-  console.log("⚠ email.routes absent");
+  console.log("email.routes absent");
 }
 
 try {
   app.use("/api/jobs", require("./routes/job.routes"));
 } catch (err) {
-  console.log("⚠ job.routes absent");
+  console.log("job.routes absent");
 }
 
 try {
   app.use("/api/candidates", require("./routes/candidate.routes"));
 } catch (err) {
-  console.log("⚠ candidate.routes absent");
+  console.log("candidate.routes absent");
 }
 
 try {
   app.use("/api/matching", require("./routes/matching.routes"));
 } catch (err) {
-  console.log("⚠ matching.routes absent");
+  console.log("matching.routes absent");
 }
+
+/* LINKEDIN ROUTE */
+app.use("/api/linkedin", linkedinRoutes);
 
 /* ===============================
    TEST ROUTE
 =============================== */
 app.get("/", (req, res) => {
-  res.send("🚀 Backend RH running");
+  res.send("Backend RH running");
 });
 
 /* ===============================
@@ -69,13 +76,33 @@ try {
 
   if (startEmailWatcher) {
     startEmailWatcher();
-    console.log("📩 Email watcher démarré");
-  } else {
-    console.log("⚠ startEmailWatcher non trouvé");
+    console.log("Email watcher démarré");
   }
 } catch (err) {
-  console.error("❌ Email watcher error:", err.message);
+  console.error("Email watcher error:", err.message);
 }
+
+/* ===============================
+   LINKEDIN SYNC AUTO
+=============================== */
+
+const scraperPath = path.join(
+  __dirname,
+  "../linkedin_scraper/scraper.py"
+);
+
+cron.schedule("0 * * * *", () => {
+  console.log("Synchronisation LinkedIn automatique...");
+
+  exec(`python "${scraperPath}"`, (err, stdout, stderr) => {
+    if (err) {
+      console.error("Erreur LinkedIn sync:", stderr);
+      return;
+    }
+
+    console.log(stdout);
+  });
+});
 
 /* ===============================
    404

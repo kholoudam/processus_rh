@@ -9,12 +9,18 @@
 
       <nav class="sidebar-nav">
         <ul>
-
           <li
             :class="{ active: currentPage === 'dashboard' }"
             @click="currentPage = 'dashboard'"
           >
             Dashboard
+          </li>
+
+          <li
+            :class="{ active: currentPage === 'jobs' }"
+            @click="currentPage = 'jobs'"
+          >
+            Jobs
           </li>
 
           <li
@@ -49,16 +55,8 @@
             :class="{ active: currentPage === 'recommendations' }"
             @click="currentPage = 'recommendations'"
           >
-            Recommendations
+            Recommendation
           </li>
-
-          <li
-            :class="{ active: currentPage === 'jobs' }"
-            @click="currentPage = 'jobs'"
-          >
-            Jobs
-          </li>
-
         </ul>
       </nav>
     </aside>

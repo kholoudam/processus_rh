@@ -1,0 +1,25 @@
+# requirements_cv.txt
+# Installation : pip install -r requirements_cv.txt
+
+# ── Serveur web ───────────────────────────────────────────
+flask>=3.0.0
+
+# ── Lecture PDF ───────────────────────────────────────────
+# PyMuPDF : extraction texte + images, rapide et fiable
+PyMuPDF>=1.24.0
+
+# ── Intelligence artificielle (HuggingFace) ───────────────
+# Transformers : NER + classification zéro-shot
+transformers>=4.40.0
+# PyTorch CPU (changer en torch avec CUDA si GPU disponible)
+torch>=2.2.0
+# Requis par CamemBERT (tokenizer SentencePiece)
+sentencepiece>=0.2.0
+# Accélération inférence
+accelerate>=0.29.0
+
+# ── Détection de langue ───────────────────────────────────
+langdetect>=1.0.9
+
+# ── Utilitaires ───────────────────────────────────────────
+python-dotenv>=1.0.0

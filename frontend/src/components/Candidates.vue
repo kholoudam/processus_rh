@@ -117,11 +117,18 @@
           <!-- CV -->
           <div class="section">
             <h4>CV</h4>
-            <iframe
-              v-if="sel.cv_link"
-              :src="cvUrl(sel.cv_link)"
-              class="cv-frame"
-            ></iframe>
+            <div v-if="sel.cv_link">
+              <div class="cv-actions">
+                <a :href="cvUrl(sel.cv_link)" target="_blank" class="btn-cv-open">
+                  📄 Ouvrir le CV dans un nouvel onglet
+                </a>
+              </div>
+              <iframe
+                :src="cvUrl(sel.cv_link)"
+                class="cv-frame"
+                @error="cvError = true"
+              ></iframe>
+            </div>
             <p v-else class="no-data">Aucun CV disponible</p>
           </div>
 
@@ -148,11 +155,13 @@
           <div class="section">
             <h4>Expériences</h4>
             <div
-              v-for="e in sel.experience"
-              :key="e.id"
+              v-for="(e, i) in sel.experience"
+              :key="i"
               class="timeline"
             >
-              {{ e.position }} — {{ e.company }} ({{ e.duration }})
+              <strong>{{ e.position }}</strong>
+              <span v-if="e.company && e.company !== 'null'"> — {{ e.company }}</span>
+              <span v-if="e.duration" class="timeline-date"> ({{ e.duration }})</span>
             </div>
             <p v-if="!sel.experience.length" class="no-data">—</p>
           </div>
@@ -161,33 +170,17 @@
           <div class="section">
             <h4>Formation</h4>
             <div
-              v-for="ed in sel.education"
-              :key="ed.id"
+              v-for="(ed, i) in sel.education"
+              :key="i"
               class="timeline"
             >
-              {{ ed.degree }} — {{ ed.institution }} ({{ ed.year }})
+              <strong>{{ ed.degree }}</strong>
+              <span v-if="ed.institution && ed.institution !== 'null'"> — {{ ed.institution }}</span>
+              <span v-if="ed.year" class="timeline-date"> ({{ ed.year }})</span>
             </div>
             <p v-if="!sel.education.length" class="no-data">—</p>
           </div>
 
-        </div>
-
-        <!-- ── Footer : boutons Accepter / Refuser ── -->
-        <div class="modal-footer">
-          <button
-            class="btn-accept"
-            :disabled="actionLoading"
-            @click="confirmAccept"
-          >
-            ✅ Accepter
-          </button>
-          <button
-            class="btn-reject"
-            :disabled="actionLoading"
-            @click="openRejectModal"
-          >
-            ❌ Refuser
-          </button>
         </div>
 
       </div>
@@ -239,7 +232,8 @@ export default {
       page:           1,
       perPage:        10,
 
-      toast: { show: false, message: '', type: 'success' }
+      toast: { show: false, message: '', type: 'success' },
+      cvError: false
     }
   },
 
@@ -277,11 +271,45 @@ export default {
     async openModal(c) {
       const r = await fetch(`http://localhost:3000/api/candidates/${c.id}/details`)
       const d = await r.json()
+
+      // Nettoyer et dédupliquer les skills (évite "power bisaprigueur" collés)
+      const rawSkills = d.skills?.map(s => s.skill_name) || []
+      const cleanSkills = [...new Set(
+        rawSkills
+          .flatMap(s => s.split(/[,;|/\n]+/))   // séparer sur virgule, point-virgule, pipe, slash, newline
+          .map(s => s.trim())
+          .filter(s => s.length >= 2)
+      )]
+
+      // Dédupliquer les formations (même degree + institution)
+      const seenEdu = new Set()
+      const cleanEdu = (d.education || []).filter(ed => {
+        if (!ed.degree || ed.degree.trim().length < 2) return false
+        const key = `${ed.degree?.trim()}|${ed.institution?.trim()}`
+        if (seenEdu.has(key)) return false
+        seenEdu.add(key)
+        return true
+      })
+
+      // Dédupliquer les expériences
+      const seenExp = new Set()
+      const cleanExp = (d.experience || []).filter(ex => {
+        if (!ex.position || ex.position.trim().length < 2) return false
+        const key = `${ex.position?.trim()}|${ex.company?.trim()}|${ex.duration?.trim()}`
+        if (seenExp.has(key)) return false
+        seenExp.add(key)
+        return true
+      })
+
       this.sel = {
         ...d.candidate,
-        skills:     d.skills?.map(s => s.skill_name) || [],
-        experience: d.experience || [],
-        education:  d.education  || []
+        // statut depuis application (c.status n'existe pas dans le nouveau schéma)
+        status:     c.status || d.candidate?.status || 'RECEIVED',
+        // lien CV depuis la pièce jointe
+        cv_link:    d.attachment?.file_path || null,
+        skills:     cleanSkills,
+        experience: cleanExp,
+        education:  cleanEdu,
       }
       this.rejectReason = ''
       this.showModal    = true
@@ -299,59 +327,6 @@ export default {
         body:    JSON.stringify({ status })
       })
       this.fetchCandidates()
-    },
-
-    /* ── Accepter ── */
-    async confirmAccept() {
-      if (!confirm(`Accepter la candidature de ${this.sel.name} ?`)) return
-      this.actionLoading = true
-      try {
-        const r = await fetch(`http://localhost:3000/api/candidates/${this.sel.id}/accept`, {
-          method: 'POST'
-        })
-        if (r.ok) {
-          this.showToast(`✅ ${this.sel.name} accepté(e) — un email a été envoyé.`, 'success')
-          this.closeModal()
-          this.fetchCandidates()
-        } else {
-          const err = await r.json()
-          this.showToast(err.message || 'Erreur lors de l\'acceptation', 'error')
-        }
-      } catch (e) {
-        this.showToast('Erreur réseau', 'error')
-      } finally {
-        this.actionLoading = false
-      }
-    },
-
-    /* ── Refuser ── */
-    openRejectModal() {
-      this.rejectReason    = ''
-      this.showRejectModal = true
-    },
-
-    async confirmReject() {
-      this.actionLoading = true
-      try {
-        const r = await fetch(`http://localhost:3000/api/candidates/${this.sel.id}/reject`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ reason: this.rejectReason })
-        })
-        if (r.ok) {
-          this.showToast(`❌ ${this.sel.name} refusé(e) — un email a été envoyé.`, 'success')
-          this.showRejectModal = false
-          this.closeModal()
-          this.fetchCandidates()
-        } else {
-          const err = await r.json()
-          this.showToast(err.message || 'Erreur lors du refus', 'error')
-        }
-      } catch (e) {
-        this.showToast('Erreur réseau', 'error')
-      } finally {
-        this.actionLoading = false
-      }
     },
 
     /* ── Toast ── */
@@ -634,6 +609,23 @@ export default {
 }
 
 .no-data { color: #94a3b8; font-size: 14px; }
+
+.timeline-date { color: #64748b; font-size: 13px; }
+
+.cv-actions { margin-bottom: 10px; }
+
+.btn-cv-open {
+  display: inline-block;
+  padding: 8px 16px;
+  background: #2563eb;
+  color: white;
+  border-radius: 8px;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background .2s;
+}
+.btn-cv-open:hover { background: #1d4ed8; }
 
 /* ── Modal refus ── */
 .modal-confirm {

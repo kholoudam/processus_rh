@@ -20,39 +20,43 @@
 
 <script>
 export default {
-  name: 'Sidebar',
+  name: "Sidebar",
 
   data() {
     return {
       menuItems: [
         {
-          name: 'Dashboard',
-          path: '/'
+          name: "Dashboard",
+          path: "/"
         },
         {
-          name: 'Candidates',
-          path: '/candidates'
+          name: "Jobs",
+          path: "/jobs"
         },
         {
-          name: 'Jobs',
-          path: '/jobs'
+          name: "Candidats",
+          path: "/candidates"
         },
         {
-          name: 'Admis',
-          path: '/admis'
+          name: "Matching",
+          path: "/matching"
         },
         {
-          name: 'Refusés',
-          path: '/refuses'
+          name: "Admis",
+          path: "/admis"
         },
         {
-          name: 'Recommendations',
-          path: '/recommendations'
+          name: "Refusés",
+          path: "/refuses"
+        },
+        {
+          name: "Recommendation",
+          path: "/recommendations"
         }
       ]
-    }
+    };
   }
-}
+};
 </script>
 
 <style scoped>
@@ -76,7 +80,6 @@ export default {
   font-size: 22px;
   font-weight: 700;
   color: #0f172a;
-  margin: 0;
 }
 
 .nav-menu {

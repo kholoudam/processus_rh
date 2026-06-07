@@ -44,12 +44,13 @@ exports.getCandidates = async (req, res) => {
         c.email,
         c.phone,
         c.address,
-        c.status,
+        a.status,
         e.subject
       FROM candidate c
       LEFT JOIN application a ON a.candidate_id = c.id
       LEFT JOIN email e ON e.id = a.email_id
-      WHERE c.status NOT IN ('ACCEPTED','REJECTED')
+      WHERE (a.status NOT IN ('ACCEPTED','REJECTED')
+         OR a.status IS NULL)
       ORDER BY c.id DESC
     `);
 
@@ -69,11 +70,18 @@ exports.getCandidateDetails = async (req, res) => {
 
   try {
     const candidate = await pool.query(`
-      SELECT c.*, e.subject, e.body
+      SELECT
+        c.*,
+        e.subject,
+        e.body,
+        a.status,
+        a.applied_date
       FROM candidate c
       LEFT JOIN application a ON a.candidate_id = c.id
       LEFT JOIN email e ON e.id = a.email_id
-      WHERE c.id=$1
+      WHERE c.id = $1
+      ORDER BY a.id DESC
+      LIMIT 1
     `, [id]);
 
     const skills = await pool.query(
@@ -82,20 +90,31 @@ exports.getCandidateDetails = async (req, res) => {
     );
 
     const experience = await pool.query(
-      'SELECT * FROM experience WHERE candidate_id=$1',
+      'SELECT * FROM experience WHERE candidate_id=$1 ORDER BY id',
       [id]
     );
 
     const education = await pool.query(
-      'SELECT * FROM education WHERE candidate_id=$1',
+      'SELECT * FROM education WHERE candidate_id=$1 ORDER BY year DESC NULLS LAST',
+      [id]
+    );
+
+    // Récupérer la pièce jointe PDF (CV)
+    const attachment = await pool.query(
+      `SELECT file_path, type FROM attachment
+       WHERE candidate_id = $1
+         AND (type LIKE '%pdf%' OR file_path LIKE '%.pdf')
+       ORDER BY id DESC
+       LIMIT 1`,
       [id]
     );
 
     res.json({
-      candidate: candidate.rows[0],
-      skills: skills.rows,
+      candidate:  candidate.rows[0],
+      skills:     skills.rows,
       experience: experience.rows,
-      education: education.rows
+      education:  education.rows,
+      attachment: attachment.rows[0] || null,
     });
 
   } catch (err) {
@@ -107,121 +126,68 @@ exports.getCandidateDetails = async (req, res) => {
 /* ===============================
    ACCEPT
 =============================== */
-exports.acceptCandidate = async (req, res) => {
+exports.acceptCandidate = async (
+  req,
+  res
+) => {
+
   const { id } = req.params;
 
-  try {
-    const cand = await pool.query(
-      'SELECT * FROM candidate WHERE id=$1',
-      [id]
-    );
+  await db.query(
+    `
+    INSERT INTO admis
+    (
+      candidate_id
+    )
+    VALUES ($1)
 
-    if (!cand.rows.length)
-      return res.status(404).json({ message: 'Candidat introuvable' });
+    ON CONFLICT
+    DO NOTHING
+  `,
+    [id]
+  );
 
-    const candidate = cand.rows[0];
-
-    const emailRes = await pool.query(`
-      SELECT e.subject, e.sender
-      FROM email e
-      JOIN application a ON a.email_id=e.id
-      WHERE a.candidate_id=$1
-      ORDER BY e.id DESC
-      LIMIT 1
-    `, [id]);
-
-    const subject = emailRes.rows[0]?.subject || 'le poste';
-    const senderEmail = emailRes.rows[0]?.sender || candidate.email;
-
-    await pool.query(
-      `UPDATE candidate SET status='ACCEPTED' WHERE id=$1`,
-      [id]
-    );
-
-    await pool.query(`
-      INSERT INTO admis(candidate_id)
-      VALUES($1)
-      ON CONFLICT DO NOTHING
-    `, [id]);
-
-    await sendMailSafe({
-      from: `"RH" <${process.env.EMAIL_USER}>`,
-      to: senderEmail,
-      subject: 'Candidature acceptée',
-      html: `
-        <p>Bonjour <strong>${candidate.name}</strong>,</p>
-        <p>Votre candidature pour <strong>${subject}</strong> a été retenue.</p>
-        <p>Cordialement,<br>L'équipe RH</p>
-      `
-    });
-
-    res.json({ message: 'Candidat accepté' });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Erreur acceptation' });
-  }
+  res.json({
+    success: true
+  });
 };
 
 /* ===============================
    REJECT
 =============================== */
-exports.rejectCandidate = async (req, res) => {
+exports.rejectCandidate = async (
+  req,
+  res
+) => {
+
   const { id } = req.params;
+
   const { reason } = req.body;
 
-  try {
-    const cand = await pool.query(
-      'SELECT * FROM candidate WHERE id=$1',
-      [id]
-    );
+  await db.query(
+    `
+    INSERT INTO refuses
+    (
+      candidate_id,
+      reason
+    )
+    VALUES ($1,$2)
 
-    if (!cand.rows.length)
-      return res.status(404).json({ message: 'Candidat introuvable' });
+    ON CONFLICT
+    (
+      candidate_id
+    )
+    DO NOTHING
+  `,
+    [
+      id,
+      reason || null
+    ]
+  );
 
-    const candidate = cand.rows[0];
-
-    const emailRes = await pool.query(`
-      SELECT e.subject, e.sender
-      FROM email e
-      JOIN application a ON a.email_id=e.id
-      WHERE a.candidate_id=$1
-      ORDER BY e.id DESC
-      LIMIT 1
-    `, [id]);
-
-    const subject = emailRes.rows[0]?.subject || 'le poste';
-    const senderEmail = emailRes.rows[0]?.sender || candidate.email;
-
-    await pool.query(
-      `UPDATE candidate SET status='REJECTED' WHERE id=$1`,
-      [id]
-    );
-
-    await pool.query(`
-      INSERT INTO refuses(candidate_id,reason)
-      VALUES($1,$2)
-      ON CONFLICT DO NOTHING
-    `, [id, reason || null]);
-
-    await sendMailSafe({
-      from: `"RH" <${process.env.EMAIL_USER}>`,
-      to: senderEmail,
-      subject: 'Candidature refusée',
-      html: `
-        <p>Bonjour <strong>${candidate.name}</strong>,</p>
-        <p>Votre candidature pour <strong>${subject}</strong> n'a pas été retenue.</p>
-        ${reason ? `<p>Motif : ${reason}</p>` : ''}
-        <p>Cordialement,<br>L'équipe RH</p>
-      `
-    });
-
-    res.json({ message: 'Candidat refusé' });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Erreur refus' });
-  }
+  res.json({
+    success: true
+  });
 };
 
 /* ===============================
@@ -356,7 +322,7 @@ exports.getRecommendations = async (req, res) => {
 exports.getAdmis = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT ad.*, c.name, c.email, c.phone, e.subject
+      SELECT ad.id, ad.accepted_at, c.name, c.email, c.phone, e.subject
       FROM admis ad
       JOIN candidate c ON c.id=ad.candidate_id
       LEFT JOIN application a ON a.candidate_id=c.id
@@ -378,7 +344,7 @@ exports.getAdmis = async (req, res) => {
 exports.getRefuses = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT rf.*, c.name, c.email, c.phone, e.subject
+      SELECT rf.id, rf.refused_at, rf.reason, c.name, c.email, c.phone, e.subject
       FROM refuses rf
       JOIN candidate c ON c.id=rf.candidate_id
       LEFT JOIN application a ON a.candidate_id=c.id
@@ -403,7 +369,7 @@ exports.updateStatus = async (req, res) => {
 
   try {
     await pool.query(
-      'UPDATE candidate SET status=$1 WHERE id=$2',
+      'UPDATE application SET status=$1 WHERE candidate_id=$2',
       [status, id]
     );
 

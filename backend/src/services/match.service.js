@@ -1,398 +1,178 @@
-const pool = require("../config/db");
+// match.service.js
+// ================
+// Matching candidat ↔ job LIÉ uniquement à sa candidature
+//
+// Pipeline :
+//   candidate → application → email.subject → job (similarité titre)
+//   Score pondéré :  Skills 60% | Expérience 25% | Éducation 15%
 
-/* =========================
-   NORMALIZE
-========================= */
-function normalize(str) {
-  return (str || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\w\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+const db = require("../config/db")
+
+// ─── Normalisation ─────────────────────────────────────────
+const norm = (s = "") => s.toLowerCase().trim().replace(/\s+/g, " ")
+
+// ─── Similarité titre job / sujet email ────────────────────
+// On compte les mots en commun (longueur > 2) entre les deux textes.
+// Ex: subject="Candidature Ingénieur Production" + title="Ingénieur de Production"
+//     → mots communs: ["ingénieur","production"] → sim = 2/3 = 0.66
+function similarity(titleStr, subjectStr) {
+  const titleWords   = norm(titleStr).split(/\s+/).filter(w => w.length > 2)
+  const subjectWords = norm(subjectStr).split(/\s+/).filter(w => w.length > 2)
+  if (!titleWords.length) return 0
+  const common = titleWords.filter(tw =>
+    subjectWords.some(sw => sw.includes(tw) || tw.includes(sw))
+  ).length
+  return common / titleWords.length
 }
 
-/* =========================================================
-   RÉFÉRENTIELS MÉTIER
-   Chaque poste a :
-     - keywords   : mots-clés techniques du domaine
-     - levels     : niveaux d'études acceptés (Bac+2, Bac+3, Bac+5…)
-     - positions  : intitulés de postes d'expérience associés
-   Ces référentiels permettent le matching même quand la
-   description du job est courte.
-========================================================= */
-const JOB_REFERENTIALS = {
-  "preparateur methodes": {
-    keywords: [
-      "catia", "solidworks", "autocad", "cfao", "fao", "sap", "amdec",
-      "gamme", "nomenclature", "industrialisation", "lean", "kaizen",
-      "methode", "process", "fabrication", "composites", "usinage",
-      "cablage", "ewis", "nadcap", "en9100", "easa", "5s", "vam", "vsm",
-      "mastercam", "nx", "siemens", "fibersim", "laminate", "ansys"
-    ],
-    levels: ["bac+2", "bts", "dut", "licence", "bac+3", "bac+5", "master", "ingenieur"],
-    positions: [
-      "preparateur methodes", "technicien methodes", "assistant industrialisation",
-      "ingenieur methodes", "ingenieur process", "charge affaires"
-    ]
-  },
+// ─── Trouver le job d'une candidature ──────────────────────
+// Cherche parmi tous les jobs celui dont le titre ressemble
+// le plus au sujet de l'email de candidature.
+async function findJobForApplication(client, emailSubject) {
+  if (!emailSubject || !emailSubject.trim()) return null
 
-  "technicien moyens generaux": {
-    keywords: [
-      "facility", "hvac", "cvc", "climatisation", "plomberie", "electricite",
-      "electrique", "maintenance", "batiment", "infrastructure", "gmao", "sap pm",
-      "iso 14001", "iso 45001", "hse", "securite", "caces", "habilitation",
-      "levage", "manutention", "hydraulique", "pneumatique", "electromecaniq",
-      "sprinkler", "ssi", "cctv", "controle acces", "gestion prestataires",
-      "budget", "multisite", "autocad"
-    ],
-    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
-    positions: [
-      "technicien moyens generaux", "technicien facilities", "technicien maintenance batiment",
-      "agent maintenance", "coordinateur maintenance", "technicien cvc",
-      "technicien electromecanique", "responsable moyens generaux"
-    ]
-  },
+  const jobs = await client.query("SELECT id, title FROM job")
+  let bestJob   = null
+  let bestScore = 0
 
-  "ingenieur de production": {
-    keywords: [
-      "lean", "six sigma", "kpi", "ordonnancement", "planification", "production",
-      "amelioration continue", "ms project", "sap pp", "sap", "mes", "oee", "trs",
-      "takt time", "kaizen", "vsm", "amdec", "5s", "smed", "tpm", "ppap",
-      "catia", "power bi", "minitab", "gestion production", "management equipe",
-      "performance", "industriel", "genie industriel", "qualite", "8d", "qrqc",
-      "airbus", "safran", "renault", "bombardier", "autoclave", "composites"
-    ],
-    levels: ["bac+5", "master", "ingenieur", "diplome ingenieur"],
-    positions: [
-      "ingenieur production", "ingenieur process", "responsable ligne",
-      "responsable production", "chef equipe", "ingenieur industrialisation",
-      "ingenieur amelioration continue", "reap"
-    ]
-  },
-
-  "technicien maintenance": {
-    keywords: [
-      "gmao", "maintenance preventive", "maintenance corrective", "hydraulique",
-      "pneumatique", "automatisme", "automate", "plc", "diagnostic", "panne",
-      "electromecaniq", "variateur", "capteur", "electricite", "mecanique",
-      "sap pm", "vibration", "lubrification", "graissage", "habilitation",
-      "iso", "lean", "5s", "tpm", "fiabilite"
-    ],
-    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
-    positions: [
-      "technicien maintenance", "technicien electromecanique",
-      "agent maintenance industrielle", "technicien automatisme",
-      "technicien instrumentation", "technicien de maintenance"
-    ]
-  },
-
-  "stagiaire maintenance": {
-    keywords: [
-      "maintenance", "mecanique", "electricite", "hydraulique", "pneumatique",
-      "gmao", "diagnostic", "electromecaniq", "automatisme"
-    ],
-    levels: ["bac+2", "bts", "dut", "licence", "bac+3"],
-    positions: ["stagiaire", "stage", "technicien maintenance", "technicien"]
-  },
-
-  "coordinateur hse": {
-    keywords: [
-      "hse", "qhse", "securite", "environnement", "iso 14001", "iso 45001",
-      "audit", "risque", "duerp", "dossier", "prevention", "formation",
-      "incident", "accident", "epi", "permis feu", "plan prevention",
-      "gestion dechets", "reglementaire"
-    ],
-    levels: ["bac+5", "master", "ingenieur"],
-    positions: [
-      "coordinateur hse", "responsable hse", "ingenieur hse", "qhse",
-      "charge hse", "technicien hse"
-    ]
-  },
-
-  "hrbp": {
-    keywords: [
-      "rh", "ressources humaines", "recrutement", "formation", "gpec",
-      "sirh", "paie", "contrat", "droit social", "relations sociales",
-      "gestion talents", "onboarding", "performance", "evaluation"
-    ],
-    levels: ["bac+5", "master"],
-    positions: ["hrbp", "responsable rh", "charge rh", "drh", "hr manager", "rh generaliste"]
-  },
-
-  "coordinateur pic pdp": {
-    keywords: [
-      "supply chain", "logistique", "planification", "s&op", "pic", "pdp",
-      "sap", "excel", "mrp", "approvisionnement", "stock", "flux",
-      "ordonnancement", "prevision", "demande"
-    ],
-    levels: ["bac+5", "master", "licence", "bac+3"],
-    positions: [
-      "coordinateur planification", "planificateur", "supply chain",
-      "gestionnaire production", "ordonnanceur"
-    ]
-  },
-
-  "reap responsable equipe autonome de production": {
-    keywords: [
-      "lean", "production", "management equipe", "amelioration continue",
-      "kpi", "trs", "oee", "5s", "kaizen", "smed", "tpm", "securite",
-      "qualite", "performance", "animation equipe", "aéronautique", "automobile"
-    ],
-    levels: ["bac+3", "bac+5", "master", "ingenieur", "licence"],
-    positions: [
-      "responsable equipe", "reap", "chef equipe", "team leader",
-      "responsable production", "superviseur", "responsable ligne"
-    ]
-  }
-};
-
-/* =========================
-   FIND JOB REFERENTIAL
-   Cherche le référentiel le plus proche du titre du poste.
-========================= */
-function findReferential(jobTitle) {
-  const normTitle = normalize(jobTitle);
-
-  // Correspondance exacte
-  if (JOB_REFERENTIALS[normTitle]) return JOB_REFERENTIALS[normTitle];
-
-  // Correspondance partielle : on prend la clé qui partage le plus de mots
-  let bestKey = null;
-  let bestScore = 0;
-
-  for (const key of Object.keys(JOB_REFERENTIALS)) {
-    const keyWords = key.split(" ").filter(w => w.length >= 4);
-    const hits = keyWords.filter(w => normTitle.includes(w)).length;
-    if (hits > bestScore) {
-      bestScore = hits;
-      bestKey = key;
+  for (const job of jobs.rows) {
+    const sim = similarity(job.title, emailSubject)
+    if (sim > bestScore) {
+      bestScore = sim
+      bestJob   = job
     }
   }
 
-  return bestScore >= 1 ? JOB_REFERENTIALS[bestKey] : null;
+  // Seuil minimum : au moins 1 mot significatif en commun (>0)
+  return bestScore > 0 ? bestJob : null
 }
 
-/* =========================
-   FIND MATCHING JOB
-   Correspondance souple sujet → poste
-========================= */
-function findMatchingJob(subject, jobs) {
-  if (!subject) return null;
-
-  const cleanSubject = normalize(
-    subject
-      .replace(/candidature\s*(spontanee|spontanée)?/gi, "")
-      .replace(/objet\s*:/gi, "")
-      .replace(/[-_:|&]/g, " ")
-  );
-
-  // 1. Titre exact dans le sujet
-  let found = jobs.find(j => cleanSubject.includes(normalize(j.title)));
-  if (found) return found;
-
-  // 2. Tous les mots significatifs (≥4 car.) du titre dans le sujet
-  found = jobs.find(j =>
-    normalize(j.title).split(" ").filter(w => w.length >= 4).every(w => cleanSubject.includes(w))
-  );
-  if (found) return found;
-
-  // 3. Partiel : meilleur score (≥ 2 mots matchés)
-  const scored = jobs
-    .map(j => {
-      const words = normalize(j.title).split(" ").filter(w => w.length >= 4);
-      const hits  = words.filter(w => cleanSubject.includes(w)).length;
-      return { job: j, hits, total: words.length };
-    })
-    .filter(x => x.hits >= Math.min(2, x.total))
-    .sort((a, b) => b.hits - a.hits);
-
-  return scored.length ? scored[0].job : null;
+// ─── Score skills (0-100) ──────────────────────────────────
+// Compte le nombre de skills du job retrouvés chez le candidat.
+function scoreSkills(candidateSkills, jobSkills) {
+  if (!jobSkills || jobSkills.length === 0) return 50
+  if (!candidateSkills || candidateSkills.length === 0) return 0
+  const matches = jobSkills.filter(js =>
+    candidateSkills.some(
+      cs => norm(cs) === norm(js) || norm(cs).includes(norm(js)) || norm(js).includes(norm(cs))
+    )
+  ).length
+  return Math.round((matches / jobSkills.length) * 100)
 }
 
-/* =========================
-   BUILD MAP  { key => [rows] }
-========================= */
-function buildMap(rows, key) {
-  const map = {};
-  rows.forEach(r => {
-    if (!map[r[key]]) map[r[key]] = [];
-    map[r[key]].push(r);
-  });
-  return map;
+// ─── Score expérience (0-100) ──────────────────────────────
+// Compare le nb de postes occupés vs le nb d'années requises dans le job.
+function scoreExperience(experienceRows, experienceRequired) {
+  const count = experienceRows?.length || 0
+  if (!experienceRequired) return count > 0 ? 70 : 30
+  const m = experienceRequired.match(/(\d+)/)
+  if (!m) return count > 0 ? 60 : 30
+  const required = parseInt(m[1])
+  if (count === 0)            return 0
+  if (count >= required)      return 100
+  if (count >= required - 1)  return 70
+  return 40
 }
 
-/* =========================================================
-   SCORING MULTI-DIMENSIONNEL
-   Poids : Skills 40% | Expérience 35% | Éducation 25%
-
-   Pour chaque dimension on calcule un score 0→100 en
-   comparant les données du candidat contre le référentiel
-   du poste (keywords, levels, positions).
-========================================================= */
-
-/**
- * Score SKILLS (40%)
- * Proportion des skills du candidat qui matchent les keywords du référentiel.
- */
-function scoreSkills(candidateSkills, ref) {
-  if (!candidateSkills.length || !ref) return 0;
-
-  const matched = candidateSkills.filter(skill => {
-    const normSkill = normalize(skill);
-    return ref.keywords.some(kw => normSkill.includes(kw) || kw.includes(normSkill));
-  });
-
-  return Math.round((matched.length / candidateSkills.length) * 100);
+// ─── Score éducation (0-100) ──────────────────────────────
+const EDU_RANK = {
+  "bac": 1, "bac+1": 2, "bts": 2, "dut": 2,
+  "bac+2": 2, "bac+3": 3, "licence": 3, "bachelor": 3,
+  "bac+4": 4, "bac+5": 5, "master": 5, "ingénieur": 5, "mba": 5,
+  "doctorat": 6, "phd": 6,
 }
 
-/**
- * Score EXPÉRIENCE (35%)
- * Vérifie si les intitulés de postes du candidat correspondent
- * aux positions attendues pour ce référentiel.
- */
-function scoreExperience(candidateExp, ref) {
-  if (!candidateExp.length || !ref) return 0;
-
-  const matched = candidateExp.filter(pos => {
-    const normPos = normalize(pos);
-    return ref.positions.some(rp => {
-      const normRp = normalize(rp);
-      // Correspondance souple : partage d'au moins 1 mot-clé significatif (≥5 car.)
-      const rpWords = normRp.split(" ").filter(w => w.length >= 5);
-      return rpWords.some(w => normPos.includes(w)) || normPos.includes(normRp);
-    });
-  });
-
-  // Score basé sur la proportion de postes matchés (plafonné à 100)
-  return Math.min(100, Math.round((matched.length / candidateExp.length) * 100));
-}
-
-/**
- * Score ÉDUCATION (25%)
- * Vérifie si le niveau d'études du candidat correspond
- * au niveau attendu par le poste.
- */
-function scoreEducation(candidateEdu, ref) {
-  if (!candidateEdu.length || !ref) return 0;
-
-  // Mapping niveau → valeur numérique
-  const LEVEL_VALUES = {
-    "bac":      1,
-    "bts":      2, "dut": 2, "bac+2": 2,
-    "licence":  3, "bac+3": 3,
-    "master":   5, "bac+5": 5,
-    "ingenieur": 5, "diplome ingenieur": 5,
-    "doctorat": 6
-  };
-
-  // Niveau minimum requis par le poste
-  const requiredLevels = ref.levels.map(l => LEVEL_VALUES[normalize(l)] || 0);
-  const minRequired    = requiredLevels.length ? Math.min(...requiredLevels) : 0;
-
-  // Niveau maximum du candidat
-  let candidateMax = 0;
-  for (const deg of candidateEdu) {
-    const normDeg = normalize(deg);
-    for (const [key, val] of Object.entries(LEVEL_VALUES)) {
-      if (normDeg.includes(key) && val > candidateMax) {
-        candidateMax = val;
-      }
-    }
+function eduRank(str = "") {
+  const s = norm(str)
+  for (const [key, rank] of Object.entries(EDU_RANK)) {
+    if (s.includes(key)) return rank
   }
-
-  if (candidateMax === 0) return 0;
-
-  // Score
-  if (candidateMax >= minRequired) return 100;
-  if (candidateMax === minRequired - 1) return 60; // légèrement sous le niveau requis
-  return 30; // très en dessous
+  return 0
 }
 
-/* =========================
-   MATCH CANDIDATES
-========================= */
-exports.matchCandidates = async () => {
+function scoreEducation(educationRows, educationRequired) {
+  if (!educationRequired) return 60
+  const required = eduRank(educationRequired)
+  if (required === 0) return 60
+  const best = Math.max(0, ...(educationRows || []).map(e => eduRank(e.degree || "")))
+  if (best === 0)             return 10
+  if (best >= required)       return 100
+  if (best === required - 1)  return 65
+  return 30
+}
+
+// ─── Score global pondéré ──────────────────────────────────
+function computeScore(s, e, edu) {
+  return Math.round(s * 0.60 + e * 0.25 + edu * 0.15)
+}
+
+// ─── Génération matching ───────────────────────────────────
+async function generateMatching() {
+  const client = await db.connect()
+
   try {
-    const jobsRes = await pool.query(`
-      SELECT id, title, COALESCE(description, '') AS description FROM job
-    `);
-
-    const candidatesRes = await pool.query(`
+    // Récupérer toutes les candidatures (hors admis et refusés)
+    // avec le sujet de l'email pour identifier le poste postulé
+    const applications = await client.query(`
       SELECT
-        c.id,
-        c.name,
-        c.email,
-        c.phone,
-        e.subject
-      FROM candidate c
-      LEFT JOIN application a ON a.candidate_id = c.id
-      LEFT JOIN email       e ON e.id = a.email_id
-      WHERE c.status NOT IN ('ACCEPTED', 'REJECTED')
-    `);
+        a.candidate_id,
+        e.subject AS email_subject
+      FROM application a
+      LEFT JOIN email e ON e.id = a.email_id
+      WHERE NOT EXISTS (SELECT 1 FROM admis   ad WHERE ad.candidate_id = a.candidate_id)
+        AND NOT EXISTS (SELECT 1 FROM refuses rf WHERE rf.candidate_id = a.candidate_id)
+    `)
 
-    const skillsRes = await pool.query(`SELECT candidate_id, skill_name FROM candidate_skill`);
-    const expRes    = await pool.query(`SELECT candidate_id, position     FROM experience`);
-    const eduRes    = await pool.query(`SELECT candidate_id, degree       FROM education`);
+    for (const app of applications.rows) {
 
-    const skillsMap = buildMap(skillsRes.rows, "candidate_id");
-    const expMap    = buildMap(expRes.rows,    "candidate_id");
-    const eduMap    = buildMap(eduRes.rows,    "candidate_id");
+      // 1. Trouver le job correspondant à ce candidat via le sujet de son email
+      const job = await findJobForApplication(client, app.email_subject)
+      if (!job) {
+        console.log(`  [MATCH] Aucun job trouvé pour sujet: "${app.email_subject}"`)
+        continue
+      }
 
-    const results = [];
+      // 2. Récupérer toutes les données du candidat
+      const [skillsRes, expRes, eduRes, jobRes] = await Promise.all([
+        client.query("SELECT skill_name FROM candidate_skill WHERE candidate_id = $1", [app.candidate_id]),
+        client.query("SELECT * FROM experience WHERE candidate_id = $1",               [app.candidate_id]),
+        client.query("SELECT * FROM education  WHERE candidate_id = $1",               [app.candidate_id]),
+        client.query("SELECT * FROM job WHERE id = $1",                                [job.id]),
+      ])
 
-    for (const candidate of candidatesRes.rows) {
-      const targetJob = findMatchingJob(candidate.subject, jobsRes.rows);
-      if (!targetJob) continue;
+      const j               = jobRes.rows[0]
+      const candidateSkills = skillsRes.rows.map(r => r.skill_name)
+      const experiences     = expRes.rows
+      const educations      = eduRes.rows
 
-      const ref = findReferential(targetJob.title);
+      // 3. Calculer les 3 scores
+      const s_skills  = scoreSkills(candidateSkills, j.skills || [])
+      const s_exp     = scoreExperience(experiences,  j.experience_required)
+      const s_edu     = scoreEducation(educations,    j.education_level)
+      const total     = computeScore(s_skills, s_exp, s_edu)
 
-      const candidateSkills = (skillsMap[candidate.id] || []).map(s => s.skill_name).filter(Boolean);
-      const candidateExp    = (expMap[candidate.id]    || []).map(e => e.position).filter(Boolean);
-      const candidateEdu    = (eduMap[candidate.id]    || []).map(e => e.degree).filter(Boolean);
+      console.log(
+        `  [MATCH] ${app.candidate_id} → job "${j.title}" | ` +
+        `skills=${s_skills}% exp=${s_exp}% edu=${s_edu}% → total=${total}%`
+      )
 
-      // ── Scores par dimension ─────────────────────────────────────────
-      const sSkills  = scoreSkills(candidateSkills, ref);     // /100
-      const sExp     = scoreExperience(candidateExp, ref);    // /100
-      const sEdu     = scoreEducation(candidateEdu, ref);     // /100
-
-      // ── Score global pondéré ─────────────────────────────────────────
-      const score = Math.round(
-        sSkills * 0.40 +
-        sExp    * 0.35 +
-        sEdu    * 0.25
-      );
-
-      // ── Items matchés pour l'affichage ───────────────────────────────
-      const matchedSkills = ref
-        ? candidateSkills.filter(skill => {
-            const ns = normalize(skill);
-            return ref.keywords.some(kw => ns.includes(kw) || kw.includes(ns));
-          })
-        : [];
-
-      results.push({
-        jobId:          targetJob.id,
-        jobTitle:       targetJob.title,
-        candidateId:    candidate.id,
-        candidateName:  candidate.name,
-        candidateEmail: candidate.email,
-        candidatePhone: candidate.phone,
-        score,
-        scoreDetail: {
-          skills:     sSkills,
-          experience: sExp,
-          education:  sEdu
-        },
-        matchedItems: [...new Set(matchedSkills)].slice(0, 8)
-      });
+      // 4. Upsert dans matching — un seul enregistrement par paire (candidat, job)
+      await client.query(`
+        INSERT INTO matching (candidate_id, job_id, score)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (candidate_id, job_id)
+        DO UPDATE SET score = EXCLUDED.score, created_at = NOW()
+      `, [app.candidate_id, j.id, total])
     }
 
-    return results.sort((a, b) => b.score - a.score);
+    return true
 
   } catch (err) {
-    console.error("MATCH ERROR:", err);
-    throw err;
+    console.error("MATCHING ERROR:", err)
+    throw err
+  } finally {
+    client.release()
   }
-};
+}
+
+module.exports = { generateMatching }

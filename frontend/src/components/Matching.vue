@@ -2,280 +2,228 @@
   <div class="matching-page">
 
     <div class="page-header">
-      <h2>Matching Intelligent</h2>
-      <button class="refresh-btn" @click="fetchMatching">
-        Actualiser
+      <div>
+        <h2>Matching Candidats ↔ Offres</h2>
+        <p>Chaque candidat est comparé uniquement au poste pour lequel il a postulé.</p>
+      </div>
+      <button class="btn-refresh" @click="loadMatching" :disabled="loading">
+        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+        Recalculer
       </button>
     </div>
 
-    <div v-if="loading" class="loading">
-      Chargement...
+    <!-- Chargement -->
+    <div v-if="loading" class="state-box">
+      <div class="spinner"></div>
+      <p>Calcul du matching en cours...</p>
     </div>
 
+    <!-- Aucun résultat -->
+    <div v-else-if="!jobs.length" class="state-box state-empty">
+      <svg width="40" height="40" fill="none" viewBox="0 0 24 24" stroke="#94a3b8" stroke-width="1.5">
+        <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+      </svg>
+      <p>Aucun résultat — vérifiez que des candidatures et des offres existent en base.</p>
+    </div>
+
+    <!-- Résultats groupés par poste -->
     <div v-else>
 
+      <!-- Un bloc par job -->
       <div
-        v-for="(group, jobTitle) in groupedMatching"
-        :key="jobTitle"
-        class="job-section"
+        v-for="job in jobs"
+        :key="job.job_id"
+        class="job-block"
       >
+        <!-- En-tête du poste -->
         <div class="job-header">
-          <h3>{{ jobTitle }}</h3>
-          <span>{{ group.length }} candidat(s)</span>
+          <div class="job-info">
+            <span class="job-title">{{ job.job_title }}</span>
+            <span v-if="job.company"  class="job-meta">🏢 {{ job.company }}</span>
+            <span v-if="job.location" class="job-meta">📍 {{ job.location }}</span>
+            <span v-if="job.education_level"     class="job-meta">🎓 {{ job.education_level }}</span>
+            <span v-if="job.experience_required" class="job-meta">⏱ {{ job.experience_required }}</span>
+          </div>
+          <span class="cand-count">{{ job.candidates.length }} candidat(s)</span>
         </div>
 
-        <table class="matching-table">
+        <!-- Table des candidats pour ce poste -->
+        <table class="match-table">
           <thead>
             <tr>
               <th>Candidat</th>
-              <th>Email</th>
-              <th>Score</th>
-              <th>Compétences</th>
+              <th>Email postulé</th>
+              <th>Score global</th>
               <th>Décision</th>
+              <th>Actions</th>
             </tr>
           </thead>
-
           <tbody>
-            <tr v-for="candidate in group" :key="candidate.id">
-              <td>{{ candidate.name }}</td>
-              <td>{{ candidate.email }}</td>
+            <tr v-for="c in job.candidates" :key="c.id" :class="rowClass(c.score)">
 
+              <!-- Candidat -->
               <td>
-                <div class="score-wrapper">
-                  <div
-                    class="score-bar"
-                    :style="{ width: candidate.score + '%' }"
-                  ></div>
-                  <span>{{ candidate.score }}%</span>
+                <div class="cand-cell">
+                  <div class="avatar">{{ initials(c.name) }}</div>
+                  <div>
+                    <div class="cand-name">{{ c.name || '—' }}</div>
+                    <div class="cand-email">{{ c.email || '—' }}</div>
+                  </div>
                 </div>
               </td>
 
+              <!-- Sujet email postulé -->
+              <td class="muted small">{{ c.applied_subject || '—' }}</td>
+
+              <!-- Score avec barre de progression -->
               <td>
-                <div class="skills">
-                  <span
-                    v-for="(skill, i) in candidate.skills"
-                    :key="i"
-                    class="skill"
-                  >
-                    {{ skill }}
-                  </span>
+                <div class="score-wrap">
+                  <div class="score-bar-bg">
+                    <div class="score-bar-fill" :style="{ width: c.score + '%' }" :class="scoreBarClass(c.score)"></div>
+                  </div>
+                  <span class="score-val" :class="scoreBadgeClass(c.score)">{{ c.score }}%</span>
                 </div>
               </td>
 
+              <!-- Décision -->
               <td>
-                <span
-                  class="decision"
-                  :class="candidate.score >= 70 ? 'good' : 'bad'"
-                >
-                  {{ candidate.score >= 70 ? 'Compatible' : 'Faible match' }}
+                <span class="decision-badge" :class="decisionClass(c.score)">
+                  {{ decisionLabel(c.score) }}
                 </span>
               </td>
+
+              <!-- Actions -->
+              <td>
+                <div class="action-btns">
+                  <button class="btn-accept" @click="accept(c.id)">✓ Accepter</button>
+                  <button class="btn-reject" @click="reject(c.id)">✗ Refuser</button>
+                </div>
+              </td>
+
             </tr>
           </tbody>
         </table>
-      </div>
 
-      <div
-        v-if="Object.keys(groupedMatching).length === 0"
-        class="empty"
-      >
-        Aucun matching disponible
       </div>
-
     </div>
 
   </div>
 </template>
 
-<script>
-export default {
-  name: "Matching",
+<script setup>
+import { ref, onMounted } from "vue"
 
-  data() {
-    return {
-      loading: false,
-      matching: []
-    }
-  },
+const API = "http://localhost:3000/api"
+const jobs    = ref([])
+const loading = ref(false)
 
-  computed: {
-    groupedMatching() {
-      const groups = {}
-
-      this.matching.forEach(item => {
-        const title = item.job_title || "Poste non défini"
-
-        if (!groups[title]) groups[title] = []
-
-        groups[title].push(item)
-      })
-
-      return groups
-    }
-  },
-
-  mounted() {
-    this.fetchMatching()
-  },
-
-  methods: {
-    async fetchMatching() {
-      this.loading = true
-
-      try {
-        const res = await fetch("http://localhost:3000/api/matching")
-        const data = await res.json()
-
-        this.matching = Array.isArray(data) ? data : []
-
-      } catch (err) {
-        console.error(err)
-      } finally {
-        this.loading = false
-      }
-    }
+async function loadMatching() {
+  loading.value = true
+  try {
+    const res  = await fetch(`${API}/matching`)
+    const data = await res.json()
+    jobs.value = data.jobs || []
+  } catch (err) {
+    console.error(err)
+  } finally {
+    loading.value = false
   }
 }
+
+async function accept(id) {
+  if (!confirm("Accepter ce candidat ?")) return
+  await fetch(`${API}/candidates/${id}/accept`, { method: "POST" })
+  await loadMatching()
+}
+
+async function reject(id) {
+  const reason = prompt("Motif du refus (optionnel)") ?? ""
+  await fetch(`${API}/candidates/${id}/reject`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ reason }),
+  })
+  await loadMatching()
+}
+
+// ─── Utilitaires d'affichage ───────────────────────────────
+const initials = (n) => n ? n.split(" ").map(w => w[0]).slice(0, 2).join("").toUpperCase() : "?"
+
+const scoreBarClass    = (s) => s >= 75 ? "bar-green"  : s >= 50 ? "bar-amber"  : "bar-red"
+const scoreBadgeClass  = (s) => s >= 75 ? "val-green"  : s >= 50 ? "val-amber"  : "val-red"
+const rowClass         = (s) => s >= 75 ? "row-green"  : s >= 50 ? "row-amber"  : ""
+const decisionClass    = (s) => s >= 75 ? "dec-strong" : s >= 50 ? "dec-medium" : "dec-low"
+const decisionLabel    = (s) => s >= 75 ? "Forte adéquation" : s >= 50 ? "À examiner" : "Faible adéquation"
+
+onMounted(loadMatching)
 </script>
 
 <style scoped>
-.matching-page {
-  padding: 30px;
-  background: #f8fafc;
-  min-height: 100vh;
-}
+.matching-page  { padding: 28px 24px 80px; background: #f8fafc; min-height: 100vh; }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 25px;
-}
+/* Header */
+.page-header    { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:28px; }
+.page-header h2 { font-size:20px; font-weight:800; color:#0f172a; margin:0; }
+.page-header p  { font-size:13px; color:#64748b; margin:4px 0 0; }
+.btn-refresh    { display:flex; align-items:center; gap:6px; padding:8px 16px; background:white; border:1px solid #e2e8f0; border-radius:8px; font-size:13px; font-weight:500; color:#475569; cursor:pointer; transition:all .15s; }
+.btn-refresh:hover:not(:disabled) { background:#0f172a; color:white; border-color:#0f172a; }
+.btn-refresh:disabled { opacity:.5; cursor:not-allowed; }
 
-.page-header h2 {
-  font-size: 24px;
-  color: #1e293b;
-}
+/* États */
+.state-box  { text-align:center; padding:60px 24px; color:#94a3b8; font-size:14px; display:flex; flex-direction:column; align-items:center; gap:12px; }
+.state-empty { background:white; border:1px solid #e2e8f0; border-radius:12px; }
+.spinner { width:28px; height:28px; border:3px solid #e2e8f0; border-top-color:#2563eb; border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 
-.refresh-btn {
-  background: #2563eb;
-  color: white;
-  border: none;
-  padding: 10px 18px;
-  border-radius: 8px;
-  cursor: pointer;
-}
+/* Bloc job */
+.job-block  { background:white; border:1px solid #e2e8f0; border-radius:12px; margin-bottom:20px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+.job-header { display:flex; justify-content:space-between; align-items:center; padding:14px 18px; background:#f8fafc; border-bottom:1px solid #e2e8f0; flex-wrap:wrap; gap:8px; }
+.job-info   { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+.job-title  { font-size:14px; font-weight:700; color:#0f172a; }
+.job-meta   { font-size:12px; color:#64748b; background:#f1f5f9; padding:2px 8px; border-radius:4px; border:1px solid #e2e8f0; }
+.cand-count { font-size:12px; font-weight:600; color:#2563eb; background:#dbeafe; padding:3px 10px; border-radius:20px; }
 
-.job-section {
-  background: white;
-  border-radius: 14px;
-  margin-bottom: 30px;
-  overflow: hidden;
-  box-shadow: 0 4px 18px rgba(0,0,0,0.05);
-}
+/* Table */
+.match-table { width:100%; border-collapse:collapse; font-size:13px; }
+.match-table thead th { background:#f8fafc; color:#64748b; font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; padding:10px 16px; border-bottom:1px solid #e2e8f0; text-align:left; }
+.match-table tbody td { padding:12px 16px; border-bottom:1px solid #f8fafc; vertical-align:middle; }
+.match-table tbody tr:last-child td { border-bottom:none; }
+.match-table tbody tr:hover td { background:#f8fafc; }
+.row-green td { border-left:3px solid #16a34a; }
+.row-amber td { border-left:3px solid #d97706; }
 
-.job-header {
-  background: #eff6ff;
-  padding: 18px 22px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
+/* Candidat cell */
+.cand-cell  { display:flex; align-items:center; gap:10px; }
+.avatar     { width:32px; height:32px; border-radius:8px; background:#dbeafe; color:#1e40af; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+.cand-name  { font-weight:600; color:#0f172a; }
+.cand-email { font-size:11px; color:#94a3b8; }
+.muted      { color:#64748b; }
+.small      { font-size:12px; }
 
-.job-header h3 {
-  color: #1d4ed8;
-  font-size: 18px;
-}
+/* Score */
+.score-wrap   { display:flex; align-items:center; gap:10px; }
+.score-bar-bg { flex:1; height:6px; background:#f1f5f9; border-radius:3px; overflow:hidden; min-width:80px; }
+.score-bar-fill { height:100%; border-radius:3px; transition:width .4s; }
+.bar-green  { background:#16a34a; }
+.bar-amber  { background:#d97706; }
+.bar-red    { background:#dc2626; }
+.score-val  { font-size:13px; font-weight:700; min-width:38px; text-align:right; }
+.val-green  { color:#16a34a; }
+.val-amber  { color:#d97706; }
+.val-red    { color:#dc2626; }
 
-.matching-table {
-  width: 100%;
-  border-collapse: collapse;
-}
+/* Décision */
+.decision-badge { font-size:11px; font-weight:600; padding:3px 10px; border-radius:20px; }
+.dec-strong { background:#dcfce7; color:#15803d; }
+.dec-medium { background:#fef3c7; color:#92400e; }
+.dec-low    { background:#fee2e2; color:#b91c1c; }
 
-.matching-table th,
-.matching-table td {
-  padding: 15px;
-  border-bottom: 1px solid #e2e8f0;
-  text-align: left;
-}
-
-.matching-table th {
-  background: #f8fafc;
-}
-
-.score-wrapper {
-  position: relative;
-  width: 120px;
-  height: 22px;
-  background: #e2e8f0;
-  border-radius: 20px;
-  overflow: hidden;
-}
-
-.score-bar {
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 100%;
-  background: #22c55e;
-}
-
-.score-wrapper span {
-  position: absolute;
-  width: 100%;
-  text-align: center;
-  font-size: 12px;
-  line-height: 22px;
-  font-weight: bold;
-}
-
-.skills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.skill {
-  background: #dbeafe;
-  color: #1e40af;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-.decision {
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.good {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.bad {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.loading,
-.empty {
-  text-align: center;
-  padding: 50px;
-  color: #64748b;
-}
-
-@media (max-width: 900px) {
-  .matching-table {
-    display: block;
-    overflow-x: auto;
-  }
-
-  .page-header {
-    flex-direction: column;
-    gap: 15px;
-  }
-}
+/* Actions */
+.action-btns { display:flex; gap:6px; }
+.btn-accept  { padding:5px 12px; background:#dcfce7; color:#15803d; border:1px solid #bbf7d0; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; }
+.btn-accept:hover { background:#16a34a; color:white; border-color:#16a34a; }
+.btn-reject  { padding:5px 12px; background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; transition:all .15s; }
+.btn-reject:hover { background:#dc2626; color:white; border-color:#dc2626; }
 </style>

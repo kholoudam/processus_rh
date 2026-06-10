@@ -190,4 +190,9 @@ app.use((err, req, res, next) => {
 
 });
 
+app.use(
+  "/api/auth",
+  require("./routes/auth.routes")
+);
+
 module.exports = app;

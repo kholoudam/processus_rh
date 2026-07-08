@@ -4,17 +4,23 @@
 //
 // Pipeline :
 //   candidate → application → email.subject → job (similarité titre)
-//   Score pondéré :  Skills 60% | Expérience 25% | Éducation 15%
+//   Score sémantique : embeddings (Sentence Transformers) + Cosine Similarity
+//   Modèle : paraphrase-multilingual-MiniLM-L12-v2
+//   (remplace l'ancien score pondéré Skills 60% | Expérience 25% | Éducation 15%)
 
 const db = require("../config/db")
+const axios = require("axios")
+
+const EMBEDDING_SERVICE_URL =
+  process.env.EMBEDDING_SERVICE_URL || "http://localhost:5003"
 
 // ─── Normalisation ─────────────────────────────────────────
 const norm = (s = "") => s.toLowerCase().trim().replace(/\s+/g, " ")
 
 // ─── Similarité titre job / sujet email ────────────────────
-// On compte les mots en commun (longueur > 2) entre les deux textes.
-// Ex: subject="Candidature Ingénieur Production" + title="Ingénieur de Production"
-//     → mots communs: ["ingénieur","production"] → sim = 2/3 = 0.66
+// Utilisée uniquement pour retrouver le job auquel le candidat a
+// postulé (association candidature → offre) — inchangée, ne fait
+// pas partie du calcul du score de matching lui-même.
 function similarity(titleStr, subjectStr) {
   const titleWords   = norm(titleStr).split(/\s+/).filter(w => w.length > 2)
   const subjectWords = norm(subjectStr).split(/\s+/).filter(w => w.length > 2)
@@ -26,8 +32,6 @@ function similarity(titleStr, subjectStr) {
 }
 
 // ─── Trouver le job d'une candidature ──────────────────────
-// Cherche parmi tous les jobs celui dont le titre ressemble
-// le plus au sujet de l'email de candidature.
 async function findJobForApplication(client, emailSubject) {
   if (!emailSubject || !emailSubject.trim()) return null
 
@@ -43,67 +47,31 @@ async function findJobForApplication(client, emailSubject) {
     }
   }
 
-  // Seuil minimum : au moins 1 mot significatif en commun (>0)
   return bestScore > 0 ? bestJob : null
 }
 
-// ─── Score skills (0-100) ──────────────────────────────────
-// Compte le nombre de skills du job retrouvés chez le candidat.
-function scoreSkills(candidateSkills, jobSkills) {
-  if (!jobSkills || jobSkills.length === 0) return 50
-  if (!candidateSkills || candidateSkills.length === 0) return 0
-  const matches = jobSkills.filter(js =>
-    candidateSkills.some(
-      cs => norm(cs) === norm(js) || norm(cs).includes(norm(js)) || norm(js).includes(norm(cs))
+// ─── Score sémantique via microservice d'embeddings ────────
+// Appelle POST /match sur le microservice Flask (port 5003) en temps
+// réel : encode le texte candidat et le texte offre, calcule la
+// cosine similarity, retourne un score 0-100.
+async function computeSemanticScore(candidatePayload, jobPayload) {
+  try {
+    const { data } = await axios.post(
+      `${EMBEDDING_SERVICE_URL}/match`,
+      { candidate: candidatePayload, job: jobPayload },
+      { timeout: 15000 }
     )
-  ).length
-  return Math.round((matches / jobSkills.length) * 100)
-}
-
-// ─── Score expérience (0-100) ──────────────────────────────
-// Compare le nb de postes occupés vs le nb d'années requises dans le job.
-function scoreExperience(experienceRows, experienceRequired) {
-  const count = experienceRows?.length || 0
-  if (!experienceRequired) return count > 0 ? 70 : 30
-  const m = experienceRequired.match(/(\d+)/)
-  if (!m) return count > 0 ? 60 : 30
-  const required = parseInt(m[1])
-  if (count === 0)            return 0
-  if (count >= required)      return 100
-  if (count >= required - 1)  return 70
-  return 40
-}
-
-// ─── Score éducation (0-100) ──────────────────────────────
-const EDU_RANK = {
-  "bac": 1, "bac+1": 2, "bts": 2, "dut": 2,
-  "bac+2": 2, "bac+3": 3, "licence": 3, "bachelor": 3,
-  "bac+4": 4, "bac+5": 5, "master": 5, "ingénieur": 5, "mba": 5,
-  "doctorat": 6, "phd": 6,
-}
-
-function eduRank(str = "") {
-  const s = norm(str)
-  for (const [key, rank] of Object.entries(EDU_RANK)) {
-    if (s.includes(key)) return rank
+    return data.score
+  } catch (err) {
+    console.error(
+      "  [MATCH] Erreur appel embedding service:",
+      err.response?.data?.error || err.message
+    )
+    // En cas d'échec du microservice, on ne masque pas l'erreur avec un
+    // score arbitraire — on renvoie null pour que l'appelant décide
+    // (ex: passer ce candidat plutôt que stocker une fausse valeur).
+    return null
   }
-  return 0
-}
-
-function scoreEducation(educationRows, educationRequired) {
-  if (!educationRequired) return 60
-  const required = eduRank(educationRequired)
-  if (required === 0) return 60
-  const best = Math.max(0, ...(educationRows || []).map(e => eduRank(e.degree || "")))
-  if (best === 0)             return 10
-  if (best >= required)       return 100
-  if (best === required - 1)  return 65
-  return 30
-}
-
-// ─── Score global pondéré ──────────────────────────────────
-function computeScore(s, e, edu) {
-  return Math.round(s * 0.60 + e * 0.25 + edu * 0.15)
 }
 
 // ─── Génération matching ───────────────────────────────────
@@ -140,20 +108,39 @@ async function generateMatching() {
         client.query("SELECT * FROM job WHERE id = $1",                                [job.id]),
       ])
 
-      const j               = jobRes.rows[0]
-      const candidateSkills = skillsRes.rows.map(r => r.skill_name)
-      const experiences     = expRes.rows
-      const educations      = eduRes.rows
+      const j = jobRes.rows[0]
 
-      // 3. Calculer les 3 scores
-      const s_skills  = scoreSkills(candidateSkills, j.skills || [])
-      const s_exp     = scoreExperience(experiences,  j.experience_required)
-      const s_edu     = scoreEducation(educations,    j.education_level)
-      const total     = computeScore(s_skills, s_exp, s_edu)
+      const candidatePayload = {
+        skills: skillsRes.rows.map(r => r.skill_name),
+        experience: expRes.rows.map(r => ({
+          position: r.position,
+          company:  r.company,
+          duration: r.duration,
+        })),
+        education: eduRes.rows.map(r => ({
+          degree:      r.degree,
+          institution: r.institution,
+        })),
+      }
+
+      const jobPayload = {
+        title:                j.title,
+        description:          j.description,
+        skills:               j.skills || [],
+        experience_required:  j.experience_required,
+        education_level:      j.education_level,
+      }
+
+      // 3. Calculer le score sémantique en temps réel via le microservice
+      const total = await computeSemanticScore(candidatePayload, jobPayload)
+
+      if (total === null) {
+        console.log(`  [MATCH] Score non calculé (service indisponible) pour candidat ${app.candidate_id}`)
+        continue
+      }
 
       console.log(
-        `  [MATCH] ${app.candidate_id} → job "${j.title}" | ` +
-        `skills=${s_skills}% exp=${s_exp}% edu=${s_edu}% → total=${total}%`
+        `  [MATCH] ${app.candidate_id} → job "${j.title}" | score sémantique=${total}%`
       )
 
       // 4. Upsert dans matching — un seul enregistrement par paire (candidat, job)

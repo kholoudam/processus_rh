@@ -6,6 +6,8 @@ router.get('/admis', controller.getAdmis);
 router.get('/refuses', controller.getRefuses);
 router.get('/recommendations', controller.getRecommendations);
 
+router.get('/details', controller.getAllCandidatesDetails);
+
 router.get('/:id/details', controller.getCandidateDetails);
 
 router.post('/:id/accept', controller.acceptCandidate);

@@ -1,0 +1,13 @@
+Flask==3.0.3
+
+sentence-transformers==3.0.1
+
+torch>=2.2.0
+
+transformers>=4.41.0
+
+scikit-learn>=1.4.2
+
+numpy>=1.26.4
+
+scipy>=1.13.1

@@ -74,3 +74,44 @@ exports.getMatching = async (req, res) => {
     res.status(500).json({ success: false, message: err.message })
   }
 }
+
+// GET /api/matching/stats
+// Score moyen / min / max par poste, calculé sur tous les matchings
+// existants (candidats encore actifs, admis et refusés confondus).
+exports.getMatchingStats = async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        j.id    AS job_id,
+        j.title AS job_title,
+
+        ROUND(AVG(m.score)::numeric, 1) AS avg_score,
+        MIN(m.score)                    AS min_score,
+        MAX(m.score)                    AS max_score,
+        COUNT(m.id)                     AS candidate_count
+
+      FROM matching m
+      JOIN job j ON j.id = m.job_id
+      GROUP BY j.id, j.title
+      ORDER BY avg_score DESC
+    `)
+
+    const stats = result.rows.map(row => ({
+      job_id:           row.job_id,
+      job_title:        row.job_title,
+      avg_score:        parseFloat(row.avg_score),
+      min_score:        parseFloat(row.min_score),
+      max_score:        parseFloat(row.max_score),
+      candidate_count:  parseInt(row.candidate_count),
+    }))
+
+    res.json({
+      success: true,
+      stats,
+    })
+
+  } catch (err) {
+    console.error("getMatchingStats:", err.message)
+    res.status(500).json({ success: false, message: err.message })
+  }
+}

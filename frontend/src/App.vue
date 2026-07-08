@@ -243,7 +243,7 @@
 
 
       <!-- PAGE PROFIL -->
-      <main class="page-content">
+      <main class="page-content" :class="{ 'page-content--chat': currentPage === 'chatbot' }">
         <div v-if="currentPage === 'profile'" class="profile-wrap">
 
           <div class="profile-card">
@@ -300,6 +300,7 @@
           <Admis           v-if="currentPage === 'admis'" />
           <Refuses         v-if="currentPage === 'refuses'" />
           <Recommendations v-if="currentPage === 'recommendations'" />
+          <Chatbot         v-if="currentPage === 'chatbot'" />
           <Jobs            v-if="currentPage === 'jobs'" />
         </template>
       </main>
@@ -316,10 +317,11 @@ import Matching       from './components/Matching.vue'
 import Admis          from './components/Admis.vue'
 import Refuses        from './components/Refuses.vue'
 import Recommendations from './components/Recommendations.vue'
+import Chatbot from './components/Chatbot.vue'
 import Jobs           from './components/Jobs.vue'
 
 export default {
-  components: { Dashboard, Candidates, Matching, Admis, Refuses, Recommendations, Jobs },
+  components: { Dashboard, Candidates, Matching, Admis, Refuses, Recommendations, Chatbot, Jobs },
 
   data() {
     return {
@@ -343,6 +345,7 @@ export default {
         { key: 'admis',           label: 'Admis',           icon: '<svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>' },
         { key: 'refuses',         label: 'Refusés',         icon: '<svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>' },
         { key: 'recommendations', label: 'Recommandations', icon: '<svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>' },
+        { key: 'chatbot',         label: 'Assistant RH',    icon: '<svg width="17" height="17" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 18v3"/><circle cx="8.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="10" r="1" fill="currentColor" stroke="none"/></svg>' },
       ]
     }
   },
@@ -603,7 +606,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f8fafc; colo
 .sb-user-role { font-size: 10px; color: rgba(255,255,255,.4); }
 
 /* ── MAIN AREA ──────────────────────── */
-.main-area { margin-left: 245px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+.main-area { margin-left: 245px; flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
 /* ── TOPBAR ─────────────────────────── */
 .topbar {
@@ -682,7 +685,22 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f8fafc; colo
 .dp-overlay { position: fixed; inset: 0; z-index: 89; background: transparent; }
 
 /* ── CONTENU ────────────────────────── */
-.page-content { flex: 1; padding: 28px 24px 60px; background: #f8fafc; }
+.page-content {
+  flex: 1;
+  padding: 28px 24px 60px;
+  background: #f8fafc;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Mode chat : le composant Recommendations gère son propre layout */
+.page-content--chat {
+  padding: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  background: transparent !important;
+}
 
 /* ── PROFIL ─────────────────────────── */
 .profile-wrap { max-width: 600px; }
@@ -719,4 +737,5 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f8fafc; colo
 .detail-row { display: flex; align-items: flex-start; gap: 12px; }
 .detail-label { font-size: 11px; color: #94a3b8; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
 .detail-value { font-size: 14px; color: #0f172a; font-weight: 500; margin-top: 2px; }
+
 </style>

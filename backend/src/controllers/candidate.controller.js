@@ -1,6 +1,86 @@
 const pool = require('../config/db');
 const nodemailer = require('nodemailer');
 
+
+exports.getAllCandidatesDetails = async (req, res) => {
+  try {
+
+    const candidates = await pool.query(`
+      SELECT DISTINCT ON (c.id)
+          c.id,
+          c.name,
+          c.email,
+          c.phone,
+          c.address,
+          e.subject,
+          e.body,
+          a.status,
+          a.applied_date
+      FROM candidate c
+      LEFT JOIN application a
+          ON a.candidate_id = c.id
+      LEFT JOIN email e
+          ON e.id = a.email_id
+      ORDER BY c.id DESC, a.id DESC
+    `);
+
+    const data = [];
+
+    for (const candidate of candidates.rows) {
+
+      const skills = await pool.query(
+        `SELECT skill_name
+         FROM candidate_skill
+         WHERE candidate_id = $1`,
+        [candidate.id]
+      );
+
+      const experience = await pool.query(
+        `SELECT *
+         FROM experience
+         WHERE candidate_id = $1
+         ORDER BY id`,
+        [candidate.id]
+      );
+
+      const education = await pool.query(
+        `SELECT *
+         FROM education
+         WHERE candidate_id = $1
+         ORDER BY year DESC NULLS LAST`,
+        [candidate.id]
+      );
+
+      const attachment = await pool.query(
+        `SELECT file_path, type
+         FROM attachment
+         WHERE candidate_id = $1
+         AND (type LIKE '%pdf%' OR file_path LIKE '%.pdf')
+         ORDER BY id DESC
+         LIMIT 1`,
+        [candidate.id]
+      );
+
+      data.push({
+        candidate,
+        skills: skills.rows,
+        experience: experience.rows,
+        education: education.rows,
+        attachment: attachment.rows[0] || null
+      });
+    }
+
+    res.json(data);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      message: "Erreur récupération des candidats"
+    });
+  }
+};
+
+
 /* ===============================
    MAIL CONFIG
 =============================== */
@@ -45,6 +125,7 @@ exports.getCandidates = async (req, res) => {
         c.phone,
         c.address,
         a.status,
+        a.applied_date,
         e.subject
       FROM candidate c
       LEFT JOIN application a ON a.candidate_id = c.id
@@ -133,7 +214,7 @@ exports.acceptCandidate = async (
 
   const { id } = req.params;
 
-  await db.query(
+  await pool.query(
     `
     INSERT INTO admis
     (
@@ -164,7 +245,7 @@ exports.rejectCandidate = async (
 
   const { reason } = req.body;
 
-  await db.query(
+  await pool.query(
     `
     INSERT INTO refuses
     (
@@ -322,11 +403,16 @@ exports.getRecommendations = async (req, res) => {
 exports.getAdmis = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT ad.id, ad.accepted_at, c.name, c.email, c.phone, e.subject
+      SELECT
+        ad.id, ad.accepted_at,
+        c.name, c.email, c.phone,
+        MIN(e.subject)       AS subject,
+        MIN(a.applied_date)  AS applied_date
       FROM admis ad
       JOIN candidate c ON c.id=ad.candidate_id
       LEFT JOIN application a ON a.candidate_id=c.id
       LEFT JOIN email e ON e.id=a.email_id
+      GROUP BY ad.id, ad.accepted_at, c.name, c.email, c.phone
       ORDER BY ad.accepted_at DESC
     `);
 
@@ -344,11 +430,16 @@ exports.getAdmis = async (req, res) => {
 exports.getRefuses = async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT rf.id, rf.refused_at, rf.reason, c.name, c.email, c.phone, e.subject
+      SELECT
+        rf.id, rf.refused_at, rf.reason,
+        c.name, c.email, c.phone,
+        MIN(e.subject)       AS subject,
+        MIN(a.applied_date)  AS applied_date
       FROM refuses rf
       JOIN candidate c ON c.id=rf.candidate_id
       LEFT JOIN application a ON a.candidate_id=c.id
       LEFT JOIN email e ON e.id=a.email_id
+      GROUP BY rf.id, rf.refused_at, rf.reason, c.name, c.email, c.phone
       ORDER BY rf.refused_at DESC
     `);
 

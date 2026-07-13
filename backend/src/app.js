@@ -212,14 +212,9 @@ require("./routes/auth.routes")
 =============================== */
 
 
-app.use(
-
-"/api/chatbot",
-
-chatbotRoutes
-
-);
-
+//app.use("/api/chatbot",chatbotRoutes);
+// app.js (ou server.js) — ajouter si pas déjà branché
+app.use('/api/chatbot', require('./routes/chatbot.routes'));
 
 
 

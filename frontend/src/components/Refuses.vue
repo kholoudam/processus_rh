@@ -32,7 +32,6 @@
             <th>Téléphone</th>
             <th>Motif</th>
             <th>Date de refus</th>
-            <th>Recommendation</th>
           </tr>
         </thead>
 
@@ -64,15 +63,6 @@
             </td>
 
             <td class="muted">{{ formatDate(r.refused_at) }}</td>
-
-            <td>
-              <button
-                class="recommend-btn"
-                @click="openRecommendModal(r)"
-              >
-                💌 Recommander
-              </button>
-            </td>
           </tr>
         </tbody>
       </table>

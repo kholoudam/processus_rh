@@ -13,6 +13,7 @@ router.get('/:id/details', controller.getCandidateDetails);
 router.post('/:id/accept', controller.acceptCandidate);
 router.post('/:id/reject', controller.rejectCandidate);
 router.post('/:id/recommend', controller.recommendCandidate);
+router.post('/:id/recommend/send', controller.sendRecommendationMail);
 
 router.put('/:id/status', controller.updateStatus);
 

@@ -85,7 +85,7 @@
 
               <td>
                 <div class="action-btns">
-                  <button class="btn-accept" @click="openAcceptModal(c)">✓ Accepter</button>
+                  <button class="btn-accept" @click="openAcceptModal(c, job)">✓ Accepter</button>
                   <button class="btn-reject" @click="openRejectModal(c)">✗ Refuser</button>
                 </div>
               </td>
@@ -111,9 +111,24 @@
           <h3 class="modal-title">Confirmer l'acceptation</h3>
           <p class="modal-body">
             Vous êtes sur le point d'accepter
-            <strong>{{ acceptModal.candidate?.name }}</strong>.
-            Cette action est définitive et retirera le candidat de la liste de matching.
+            <strong>{{ acceptModal.candidate?.name }}</strong>
+            pour le poste
+            <strong>{{ acceptModal.job?.job_title }}</strong>.
           </p>
+
+          <div v-if="otherCandidatesCount > 0" class="modal-warning">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+            </svg>
+            <span>
+              Le poste sera considéré comme pourvu :
+              <strong>{{ otherCandidatesCount }}</strong> autre(s) candidat(s) en lice
+              pour ce même poste seront automatiquement <strong>refusés</strong>
+              et apparaîtront dans l'onglet Refusés. Ceux ayant un bon score
+              sur un autre poste seront recommandés automatiquement.
+            </span>
+          </div>
+
           <div class="modal-actions">
             <button class="modal-btn modal-btn--cancel" @click="closeAcceptModal">
               Annuler
@@ -165,11 +180,47 @@
       </div>
     </Teleport>
 
+    <!-- ═══════════════════════════════════════════════
+         TOAST RÉSULTAT (refus/recommandations en cascade)
+    ════════════════════════════════════════════════ -->
+    <Teleport to="body">
+      <div v-if="resultToast.visible" class="toast-overlay">
+        <div class="toast-box">
+          <div class="toast-header">
+            <span class="toast-title">✓ Candidat accepté</span>
+            <button class="toast-close" @click="resultToast.visible = false">✕</button>
+          </div>
+
+          <div v-if="resultToast.autoRejected.length" class="toast-section">
+            <div class="toast-section-title">
+              {{ resultToast.autoRejected.length }} candidat(s) automatiquement refusé(s)
+            </div>
+            <ul class="toast-list">
+              <li v-for="r in resultToast.autoRejected" :key="r.id">{{ r.name }}</li>
+            </ul>
+          </div>
+
+          <div v-if="resultToast.autoRecommended.length" class="toast-section">
+            <div class="toast-section-title toast-section-title--rec">
+              {{ resultToast.autoRecommended.length }} recommandation(s) envoyée(s)
+            </div>
+            <ul class="toast-list">
+              <li v-for="r in resultToast.autoRecommended" :key="r.id">
+                {{ r.name }} → <strong>{{ r.job_title }}</strong> ({{ r.score }}%)
+              </li>
+            </ul>
+          </div>
+
+          <button class="toast-ok" @click="resultToast.visible = false">Compris</button>
+        </div>
+      </div>
+    </Teleport>
+
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from "vue"
+import { ref, computed, onMounted } from "vue"
 
 const API = "http://localhost:3000/api"
 const jobs         = ref([])
@@ -177,8 +228,18 @@ const loading      = ref(false)
 const actionLoading = ref(false)
 
 // ─── État des modals ────────────────────────────────────────
-const acceptModal = ref({ visible: false, candidate: null })
-const rejectModal = ref({ visible: false, candidate: null, reason: "" })
+const acceptModal  = ref({ visible: false, candidate: null, job: null })
+const rejectModal  = ref({ visible: false, candidate: null, reason: "" })
+const resultToast  = ref({ visible: false, autoRejected: [], autoRecommended: [] })
+
+// Nombre d'autres candidats encore en lice pour le même poste
+// (utilisé pour l'avertissement dans la modale d'acceptation)
+const otherCandidatesCount = computed(() => {
+  if (!acceptModal.value.job || !acceptModal.value.candidate) return 0
+  return acceptModal.value.job.candidates.filter(
+    c => c.id !== acceptModal.value.candidate.id
+  ).length
+})
 
 // ─── Chargement du matching ─────────────────────────────────
 async function loadMatching() {
@@ -195,20 +256,36 @@ async function loadMatching() {
 }
 
 // ─── Modal Accepter ─────────────────────────────────────────
-function openAcceptModal(candidate) {
-  acceptModal.value = { visible: true, candidate }
+function openAcceptModal(candidate, job) {
+  acceptModal.value = { visible: true, candidate, job }
 }
 
 function closeAcceptModal() {
-  acceptModal.value = { visible: false, candidate: null }
+  acceptModal.value = { visible: false, candidate: null, job: null }
 }
 
 async function confirmAccept() {
   if (!acceptModal.value.candidate) return
   actionLoading.value = true
   try {
-    await fetch(`${API}/candidates/${acceptModal.value.candidate.id}/accept`, { method: "POST" })
+    const res = await fetch(`${API}/candidates/${acceptModal.value.candidate.id}/accept`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ jobId: acceptModal.value.job?.job_id }),
+    })
+    const data = await res.json()
+
     closeAcceptModal()
+
+    // Afficher le résumé si des refus/recommandations en cascade ont eu lieu
+    if ((data.autoRejected?.length || 0) > 0 || (data.autoRecommended?.length || 0) > 0) {
+      resultToast.value = {
+        visible: true,
+        autoRejected:    data.autoRejected    || [],
+        autoRecommended: data.autoRecommended || [],
+      }
+    }
+
     await loadMatching()
   } catch (err) {
     console.error(err)
@@ -344,7 +421,7 @@ onMounted(loadMatching)
   border-radius: 16px;
   padding: 32px 28px 24px;
   width: 100%;
-  max-width: 420px;
+  max-width: 440px;
   box-shadow: 0 20px 60px rgba(15,23,42,.18);
   animation: slideUp .18s ease;
 }
@@ -377,10 +454,27 @@ onMounted(loadMatching)
   color: #475569;
   text-align: center;
   line-height: 1.6;
-  margin: 0 0 20px;
+  margin: 0 0 16px;
 }
 
 .modal-body strong { color: #0f172a; }
+
+/* Avertissement refus en cascade */
+.modal-warning {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  margin: 0 0 20px;
+}
+.modal-warning svg { flex-shrink: 0; margin-top: 1px; }
+.modal-warning strong { color: #78350f; }
 
 /* Champ textarea (modal refus) */
 .modal-field    { margin-bottom: 20px; }
@@ -450,4 +544,56 @@ onMounted(loadMatching)
   animation: spin .6s linear infinite;
   display: inline-block;
 }
+
+/* ════════════════════════════════
+   TOAST RÉSULTAT
+════════════════════════════════ */
+.toast-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+  animation: fadeIn .15s ease;
+}
+
+.toast-box {
+  background: white;
+  border-radius: 16px;
+  padding: 22px 24px 24px;
+  width: 100%;
+  max-width: 440px;
+  max-height: 70vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(15,23,42,.18);
+  animation: slideUp .18s ease;
+}
+
+.toast-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+.toast-title  { font-size:16px; font-weight:700; color:#15803d; }
+.toast-close  { background:none; border:none; font-size:14px; color:#94a3b8; cursor:pointer; padding:4px; }
+.toast-close:hover { color:#475569; }
+
+.toast-section       { margin-bottom:16px; }
+.toast-section-title { font-size:12.5px; font-weight:700; color:#b91c1c; margin-bottom:8px; }
+.toast-section-title--rec { color:#2563eb; }
+.toast-list  { margin:0; padding-left:18px; font-size:13px; color:#334155; line-height:1.9; }
+.toast-list strong { color:#0f172a; }
+
+.toast-ok {
+  width: 100%;
+  padding: 10px 0;
+  background: #0f172a;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.toast-ok:hover { background: #1e293b; }
 </style>
